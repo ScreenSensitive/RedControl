@@ -26080,6 +26080,11 @@ sudo -n umr --version
                                fg=self.fg, bg=bg_card)
         gamma_label.pack(anchor='w', pady=(2, 2))
 
+        csc_label = tk.Label(status_card, text="CSC / Gamut:  —",
+                             font=('SF Pro Text', 11),
+                             fg=self.fg, bg=bg_card)
+        csc_label.pack(anchor='w', pady=(2, 2))
+
         dsc_label = tk.Label(status_card, text="DSC:  —",
                              font=('SF Pro Text', 11),
                              fg=self.fg, bg=bg_card)
@@ -26195,6 +26200,34 @@ sudo -n umr --version
         self.create_info_icon(pin_row, title="Pin", body=pin_info,
                               bg=bg_card).pack(side='left', padx=(8, 0))
 
+        # Bypass the driver's color LUTs on this pipe
+        lut_row = tk.Frame(force_card, bg=bg_card)
+        lut_row.pack(anchor='w', pady=(10, 0))
+        tk.Label(lut_row, text="Bypass Color LUTs",
+                 font=('SF Pro Text', 12), fg=self.fg, bg=bg_card).pack(side='left')
+        lut_bypass_var = tk.BooleanVar(value=False)
+        lut_switch = ToggleSwitch(
+            lut_row, lut_bypass_var,
+            command=lambda: self.toggle_lut_bypass(idx, connector_name),
+            bg=bg_card)
+        lut_switch.pack(side='left', padx=(16, 0))
+        lut_info = (
+            "Sets the pipe's gamma/LUT stages to bypass: gamma correction (GAMCOR), "
+            "blend gamma, 3D LUT, and the MPCC output gamma LUT. Pixels pass through "
+            "untouched by the driver's color management — night light, ICC profiles, "
+            "and xrandr gamma stop affecting this output until restored.\n\n"
+            "Turning the switch off restores the modes that were active when you "
+            "bypassed them.\n\n"
+            "Not included: the output CSC matrix (it also handles limited/full RGB "
+            "range conversion — bypassing it could break levels) and the gamut remap "
+            "matrix. Both are shown read-only in Live Signal.\n\n"
+            "Note: the driver rewrites LUT modes whenever something changes gamma "
+            "(night light transitions, xrandr --gamma, ICC loaders) — re-enable the "
+            "bypass afterwards if that happens."
+        )
+        self.create_info_icon(lut_row, title="Bypass Color LUTs", body=lut_info,
+                              bg=bg_card).pack(side='left', padx=(8, 0))
+
         self.dp_widgets[idx] = {
             'encoder_var': encoder_var,
             'encoder_box': encoder_box,
@@ -26207,6 +26240,9 @@ sudo -n umr --version
             'dplink_label': dplink_label,
             'srcfmt_label': srcfmt_label,
             'gamma_label': gamma_label,
+            'csc_label': csc_label,
+            'lut_bypass_var': lut_bypass_var,
+            'lut_saved': None,
             'dsc_label': dsc_label,
             'vrr_label': vrr_label,
             'mrefresh_label': mrefresh_label,
@@ -26270,6 +26306,7 @@ sudo -n umr --version
             w['dplink_label'].config(text="Link Config:  —")
             w['srcfmt_label'].config(text="Source Framebuffer:  —")
             w['gamma_label'].config(text="Color LUTs:  —")
+            w['csc_label'].config(text="CSC / Gamut:  —")
             w['dsc_label'].config(text="DSC:  —")
             w['vrr_label'].config(text="VRR Range:  —")
             w['mrefresh_label'].config(text="Measured Refresh:  —")
@@ -26371,16 +26408,36 @@ sudo -n umr --version
                                      ["CM_SHAPER_LUT_MODE", "CM_SHAPER_MODE"]) or {}
         if sh.get("CM_SHAPER_LUT_MODE") or sh.get("CM_SHAPER_MODE"):
             luts.append("shaper")
+        bg3 = self.read_umr_bitfields(f"mmCM{pipe}_CM_BLNDGAM_CONTROL",
+                                      ["CM_BLNDGAM_MODE"]) or {}
+        if bg3.get("CM_BLNDGAM_MODE"):
+            luts.append("blend gamma")
+        l3d = self.read_umr_bitfields(f"mmCM{pipe}_CM_3DLUT_MODE",
+                                      ["CM_3DLUT_MODE"]) or {}
+        if l3d.get("CM_3DLUT_MODE"):
+            luts.append("3D LUT")
         og = self.read_umr_bitfields(f"mmMPCC_OGAM{pipe}_MPCC_OGAM_CONTROL",
                                      ["MPCC_OGAM_MODE"]) or {}
         if og.get("MPCC_OGAM_MODE"):
             luts.append("output gamma")
-        if not (cm or sh or og):
+        if not (cm or sh or bg3 or l3d or og):
             w['gamma_label'].config(text="Color LUTs:  unknown")
         elif luts:
             w['gamma_label'].config(text=f"Color LUTs:  active ({', '.join(luts)})")
         else:
             w['gamma_label'].config(text="Color LUTs:  all bypassed")
+
+        # CSC matrix / gamut remap (read-only: OCSC also does range conversion)
+        csc = self.read_umr_bitfields(f"mmMPC_OUT{pipe}_CSC_MODE",
+                                      ["MPC_OCSC_MODE"]) or {}
+        gr = self.read_umr_bitfields(f"mmCM{pipe}_CM_GAMUT_REMAP_CONTROL",
+                                     ["CM_GAMUT_REMAP_MODE"]) or {}
+        if not (csc or gr):
+            w['csc_label'].config(text="CSC / Gamut:  unknown")
+        else:
+            csc_txt = "output CSC active" if csc.get("MPC_OCSC_MODE") else "output CSC bypassed"
+            gr_txt = "gamut remap active" if gr.get("CM_GAMUT_REMAP_MODE") else "gamut remap off"
+            w['csc_label'].config(text=f"CSC / Gamut:  {csc_txt} · {gr_txt}")
 
         # DSC (DP-only compression) from amdgpu debugfs
         if info['mode'] == 'DP':
@@ -26593,6 +26650,58 @@ sudo -n umr --version
         if lo == 0 and hi == 0:
             return "not supported"
         return f"{lo}–{hi} Hz"
+
+    def toggle_lut_bypass(self, idx, connector_name):
+        """Bypass (or restore) the driver's gamma/LUT stages on this pipe."""
+        w = self.dp_widgets.get(idx)
+        if not w:
+            return
+        pipe = w.get('active_pipe')
+        if pipe is None:
+            pipe = idx
+
+        lut_regs = {
+            'gamcor': (f"mmCM{pipe}_CM_GAMCOR_CONTROL", "CM_GAMCOR_MODE"),
+            'blndgam': (f"mmCM{pipe}_CM_BLNDGAM_CONTROL", "CM_BLNDGAM_MODE"),
+            'lut3d': (f"mmCM{pipe}_CM_3DLUT_MODE", "CM_3DLUT_MODE"),
+            'ogam': (f"mmMPCC_OGAM{pipe}_MPCC_OGAM_CONTROL", "MPCC_OGAM_MODE"),
+        }
+
+        if w['lut_bypass_var'].get():
+            saved = {}
+            cmds = []
+            for key, (reg, field) in lut_regs.items():
+                cur = self.read_umr_bitfields(reg, [field])
+                if cur is None or field not in cur:
+                    continue
+                saved[key] = cur[field]
+                if cur[field]:
+                    path = f"{self.asic_name}.{self.block_name}.{reg}"
+                    self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                          f"{path}.{field}", "0"])
+                    cmds.append(f"umr -wb {path}.{field} 0")
+            w['lut_saved'] = saved
+            self.log_command(f"{connector_name}: Color LUT Bypass", "active",
+                             "; ".join(cmds) if cmds else "(all LUTs already bypassed)",
+                             "bypassed", success=True)
+            self.show_status("Color LUTs bypassed — pixels pass through untouched", "info")
+        else:
+            saved = w.get('lut_saved') or {}
+            cmds = []
+            for key, (reg, field) in lut_regs.items():
+                prev = saved.get(key)
+                if prev:
+                    path = f"{self.asic_name}.{self.block_name}.{reg}"
+                    self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                          f"{path}.{field}", str(prev)])
+                    cmds.append(f"umr -wb {path}.{field} {prev}")
+            w['lut_saved'] = None
+            self.log_command(f"{connector_name}: Color LUT Bypass", "bypassed",
+                             "; ".join(cmds) if cmds else "(nothing saved to restore)",
+                             "restored", success=True)
+            self.show_status("Color LUTs restored", "info")
+
+        self.refresh_signal_panel(idx, connector_name, redetect=False)
 
     def measure_refresh_rate(self, idx):
         """Measure the true refresh rate by sampling the OTG frame counter.
