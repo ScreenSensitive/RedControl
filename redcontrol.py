@@ -26741,13 +26741,30 @@ sudo -n umr --version
         if pipe is None:
             pipe = idx
 
+        # The CRC engine only produces data with a capture window selected —
+        # program window A to cover the active area (like the driver does).
+        hres, vres = 4095, 4095
+        res = self.active_outputs.get(f"FMT{idx}", {}).get('resolution', '')
+        m = re.match(r'(\d+)x(\d+)', res or '')
+        if m:
+            hres, vres = int(m.group(1)), int(m.group(2))
+
         base = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC_CNTL"
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                              f"{base}.OTG_CRC_CONT_EN", "1"])
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                              f"{base}.OTG_CRC_EN", "1"])
+        winx = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC0_WINDOWA_X_CONTROL"
+        winy = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC0_WINDOWA_Y_CONTROL"
+        for reg_field, val in [
+            (f"{winx}.OTG_CRC0_WINDOWA_X_START", "0"),
+            (f"{winx}.OTG_CRC0_WINDOWA_X_END", str(hres)),
+            (f"{winy}.OTG_CRC0_WINDOWA_Y_START", "0"),
+            (f"{winy}.OTG_CRC0_WINDOWA_Y_END", str(vres)),
+            (f"{base}.OTG_CRC0_SELECT", "1"),  # window A
+            (f"{base}.OTG_CRC_CONT_EN", "1"),
+            (f"{base}.OTG_CRC_EN", "1"),
+        ]:
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb", reg_field, val])
         self.log_command(f"{connector_name}: Static Signal Test", "-",
-                         f"umr -wb {base}.OTG_CRC_EN 1 (CRC capture)", "running", success=True)
+                         f"umr -wb {base}.OTG_CRC_EN 1 (CRC window {hres}x{vres})",
+                         "running", success=True)
 
         samples = []
         w['crc_label'].config(text="Testing…  keep the screen completely still")
@@ -26763,11 +26780,15 @@ sudo -n umr --version
             if n < 11:
                 self.root.after(120, lambda: _sample(n + 1))
                 return
-            # done — switch the CRC engine back off
-            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                                  f"{base}.OTG_CRC_EN", "0"])
-            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                                  f"{base}.OTG_CRC_CONT_EN", "0"])
+            # done — switch the CRC engine back off and clear the window
+            for reg_field, val in [
+                (f"{base}.OTG_CRC_EN", "0"),
+                (f"{base}.OTG_CRC_CONT_EN", "0"),
+                (f"{base}.OTG_CRC0_SELECT", "0"),
+                (f"{winx}.OTG_CRC0_WINDOWA_X_END", "0"),
+                (f"{winy}.OTG_CRC0_WINDOWA_Y_END", "0"),
+            ]:
+                self.run_umr_command(["-i", str(self.gpu_instance), "-wb", reg_field, val])
             valid = [s for s in samples if any(v for v in s if v)]
             if not valid:
                 w['crc_label'].config(text="Result:  no CRC data captured — try again")
