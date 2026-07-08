@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# AppImage
+*.AppDir/
+*.AppImage
+appimagetool-*.AppImage
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Config and logs
+*.log
+.config/
+settings.json
+*.conf
+
+# Build artifacts
+redcontrol-*/
+*.tar.gz
+*.zip
+
+# Temporary files
+*.tmp
+*.bak

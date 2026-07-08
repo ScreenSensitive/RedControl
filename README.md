@@ -1,0 +1,92 @@
+# RedControl
+
+<p align="center">
+  <img src="redcontrol-icon.png" alt="RedControl Icon" width="128" height="128">
+</p>
+
+**Low-level dithering & DisplayPort signal control for AMD GPUs on Linux**
+
+RedControl talks directly to the AMD display engine (DCN) through UMR — the User Mode Register debugger — to control things no desktop settings panel exposes: per-pipe spatial/temporal dithering, color truncation, and as of v2.1 the DisplayPort stream encoder itself. Built for flicker-sensitive users, display tinkerers, and anyone who needs to know (and change) exactly what signal their AMD GPU is putting on the wire.
+
+## Features
+
+- 🎛️ **Dithering Control** — enable/disable spatial and temporal dithering, RGB noise, highpass/frame random, with per-depth and per-mode settings on every output (HDMI, DisplayPort, eDP, DVI)
+- ✂️ **Color Truncation** — force a static signal by truncating/rounding to 6/8/10/12 bpc instead of dithering
+- ⇄ **DisplayPort Signal (new in 2.1)** — live view of the DP stream encoder: pixel encoding (RGB/YCbCr) and component depth actually sent on the link, with the ability to force `DP_COMPONENT_DEPTH` instantly — no modeset required
+- 🎨 **Color / Depth** — max bpc, colorspace (BT.709/opRGB/BT.2020), RGB range (full/limited) per connector
+- 🖥️ **Multi-Monitor** — CRTC-based pipe mapping; each display configured independently
+- 🎮 **Multi-GPU** — automatic detection and switching between AMD GPUs
+- 🔄 **Settings Persistence** — per-monitor auto-save/restore
+- ⏱️ **Safe Mode Changes** — resolution/refresh changes ask for confirmation and auto-revert after 15 s if the screen goes blank
+- 💾 **VRAM Vendor Detection** — Samsung / Hynix / Micron shown next to the GPU name
+- 🚀 **System Tray** — minimize to tray with quick actions
+- 📋 **Command Log** — every register write is logged as the exact `umr` command, so you can reproduce or script anything the GUI does
+
+## Why control dithering?
+
+AMD's driver enables temporal dithering in situations where it can cause visible flicker, eye strain, or headaches for sensitive users — and there is no official switch to turn it off on Linux. RedControl gives you that switch, per output, at the register level, plus the DisplayPort-side depth control to pair with it (e.g. force a clean static 8 bpc signal with no dithering at all).
+
+## Supported AMD GPUs
+
+All AMD GPUs with a DCN (Display Core Next) display engine:
+
+- **RDNA 1**: Navi 10, 12, 14 (RX 5000 series)
+- **RDNA 2**: Navi 21, 22, 23, 24 (RX 6000 series)
+- **RDNA 3**: Navi 31, 32, 33 (RX 7000 series)
+- **APUs**: Renoir, Cezanne, Rembrandt, Phoenix (Ryzen 4000–7000 integrated graphics)
+
+## Requirements
+
+- Linux with the `amdgpu` driver (X11 session recommended; core dithering + DP signal features also work on Wayland)
+- Python 3 with Tkinter
+- [UMR](https://gitlab.freedesktop.org/tomstdenis/umr) (User Mode Register debugger)
+- Optional: `python3-pil`, `pystray` (tray icon), `vulkan-tools` (better GPU names)
+
+### Installing UMR
+
+```bash
+# Arch Linux
+yay -S umr-git
+
+# Ubuntu/Debian
+sudo apt install umr
+
+# From source
+git clone https://gitlab.freedesktop.org/tomstdenis/umr.git
+cd umr && mkdir build && cd build
+cmake .. && make && sudo make install
+```
+
+## Usage
+
+```bash
+python3 redcontrol.py            # normal launch
+python3 redcontrol.py --tray     # start in system tray
+python3 redcontrol.py --debug    # verbose console output
+```
+
+Run as a normal user — UMR calls go through `sudo`, and the app can set up passwordless access for the exact commands it needs (menu: Auto-Start → Passwordless Access).
+
+### DisplayPort Signal panel
+
+Select a DisplayPort/eDP monitor and open **DisplayPort Signal** in the sidebar:
+
+- **Live Signal** shows which DPx stream encoder drives the output (auto-matched via the DIG frontend's source CRTC), the pixel encoding (RGB 4:4:4, YCbCr 4:2:2/4:4:4/4:2:0), and the component depth on the link.
+- **Force Component Depth** writes the encoder's `DP_COMPONENT_DEPTH` field directly. Takes effect instantly; the driver reprograms it on any modeset, so reapply after resolution/refresh changes.
+
+## What changed in 2.1
+
+- **Added**: DisplayPort Signal section — DP stream encoder readout + component depth forcing via UMR
+- **Added**: mode-change confirmation dialog with 15-second auto-revert
+- **Removed**: EDID editor/viewer (spoofing, colorimetry patching, firmware EDID install) — out of scope for a signal-control tool; monitor names are still read from EDID
+- **Fixed**: outputs with untouched (power-on default) FMT registers — commonly DisplayPort — now get tabs like everything else
+- **Fixed**: hardware→UI sync no longer hardcoded to one ASIC; works on any detected GPU
+- **Fixed**: `--version`/`--help` printed nothing in default quiet mode
+
+## Disclaimer
+
+RedControl writes GPU registers directly. All writes are non-persistent (a reboot or modeset restores driver defaults), but a forced depth or encoding the sink can't handle may blank the screen until you revert. Use at your own risk.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

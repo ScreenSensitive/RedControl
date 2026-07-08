@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=RedControl
+GenericName=AMD GPU Display Control
+Comment=Advanced display pipeline control for AMD GPUs
+Exec=redcontrol %U
+Icon=redcontrol
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=AMD;GPU;Display;Monitor;Color;Dithering;
+StartupNotify=true
