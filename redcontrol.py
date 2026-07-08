@@ -26006,7 +26006,7 @@ sudo -n umr --version
         status_card.grid(row=0, column=0, sticky='nsew', padx=(12, 6), pady=6)
 
         header = tk.Frame(status_card, bg=bg_card)
-        header.pack(fill=tk.X, pady=(0, 10))
+        header.pack(fill=tk.X, pady=(0, 8))
         tk.Label(header, text="Live Signal",
                  font=('SF Pro Text', 12, 'bold'),
                  fg=self.fg, bg=bg_card).pack(side='left')
@@ -26025,7 +26025,7 @@ sudo -n umr --version
                               bg=bg_card).pack(side='left', padx=(6, 0))
 
         enc_row = tk.Frame(status_card, bg=bg_card)
-        enc_row.pack(fill=tk.X, pady=(0, 8))
+        enc_row.pack(fill=tk.X, pady=(0, 6))
         tk.Label(enc_row, text="Encoder",
                  font=('SF Pro Text', 12), fg=self.fg, bg=bg_card).pack(side='left')
         encoder_var = tk.StringVar(value="Detecting…")
@@ -26036,84 +26036,84 @@ sudo -n umr --version
         encoder_box.pack(side='left', padx=(12, 0))
 
         mode_label = tk.Label(status_card, text="Link Type:  —",
-                              font=('SF Pro Text', 11),
+                              font=('SF Pro Text', 10),
                               fg=self.fg, bg=bg_card)
         mode_label.pack(anchor='w', pady=(4, 2))
 
         encoding_label = tk.Label(status_card, text="Pixel Encoding:  —",
-                                  font=('SF Pro Text', 11),
+                                  font=('SF Pro Text', 10),
                                   fg=self.fg, bg=bg_card)
-        encoding_label.pack(anchor='w', pady=(2, 2))
+        encoding_label.pack(anchor='w', pady=(1, 1))
 
         depth_label = tk.Label(status_card, text="Depth on Link:  —",
-                               font=('SF Pro Text', 11, 'bold'),
+                               font=('SF Pro Text', 10, 'bold'),
                                fg=self.fg, bg=bg_card)
-        depth_label.pack(anchor='w', pady=(2, 2))
+        depth_label.pack(anchor='w', pady=(1, 1))
 
         deep_label = tk.Label(status_card, text="Deep Color:  —",
-                              font=('SF Pro Text', 11),
+                              font=('SF Pro Text', 10),
                               fg=self.fg, bg=bg_card)
-        deep_label.pack(anchor='w', pady=(2, 2))
+        deep_label.pack(anchor='w', pady=(1, 1))
 
         tmds_label = tk.Label(status_card, text="TMDS Clock:  —",
-                              font=('SF Pro Text', 11),
+                              font=('SF Pro Text', 10),
                               fg=self.fg, bg=bg_card)
-        tmds_label.pack(anchor='w', pady=(2, 2))
+        tmds_label.pack(anchor='w', pady=(1, 1))
 
         lanes_label = tk.Label(status_card, text="Active Lanes:  —",
-                               font=('SF Pro Text', 11),
+                               font=('SF Pro Text', 10),
                                fg=self.fg, bg=bg_card)
-        lanes_label.pack(anchor='w', pady=(2, 2))
+        lanes_label.pack(anchor='w', pady=(1, 1))
 
         dplink_label = tk.Label(status_card, text="Link Config:  —",
-                                font=('SF Pro Text', 11),
+                                font=('SF Pro Text', 10),
                                 fg=self.fg, bg=bg_card)
-        dplink_label.pack(anchor='w', pady=(2, 2))
+        dplink_label.pack(anchor='w', pady=(1, 1))
 
         srcfmt_label = tk.Label(status_card, text="Source Framebuffer:  —",
-                                font=('SF Pro Text', 11),
+                                font=('SF Pro Text', 10),
                                 fg=self.fg, bg=bg_card)
-        srcfmt_label.pack(anchor='w', pady=(2, 2))
+        srcfmt_label.pack(anchor='w', pady=(1, 1))
 
         gamma_label = tk.Label(status_card, text="Color LUTs:  —",
-                               font=('SF Pro Text', 11),
+                               font=('SF Pro Text', 10),
                                fg=self.fg, bg=bg_card)
-        gamma_label.pack(anchor='w', pady=(2, 2))
+        gamma_label.pack(anchor='w', pady=(1, 1))
 
         csc_label = tk.Label(status_card, text="CSC / Gamut:  —",
-                             font=('SF Pro Text', 11),
+                             font=('SF Pro Text', 10),
                              fg=self.fg, bg=bg_card)
-        csc_label.pack(anchor='w', pady=(2, 2))
+        csc_label.pack(anchor='w', pady=(1, 1))
 
         scaler_label = tk.Label(status_card, text="Scaler:  —",
-                                font=('SF Pro Text', 11),
+                                font=('SF Pro Text', 10),
                                 fg=self.fg, bg=bg_card)
-        scaler_label.pack(anchor='w', pady=(2, 2))
+        scaler_label.pack(anchor='w', pady=(1, 1))
 
         drr_label = tk.Label(status_card, text="Refresh Timing:  —",
-                             font=('SF Pro Text', 11),
+                             font=('SF Pro Text', 10),
                              fg=self.fg, bg=bg_card)
-        drr_label.pack(anchor='w', pady=(2, 2))
+        drr_label.pack(anchor='w', pady=(1, 1))
 
         dsc_label = tk.Label(status_card, text="DSC:  —",
-                             font=('SF Pro Text', 11),
+                             font=('SF Pro Text', 10),
                              fg=self.fg, bg=bg_card)
-        dsc_label.pack(anchor='w', pady=(2, 2))
+        dsc_label.pack(anchor='w', pady=(1, 1))
 
         vrr_label = tk.Label(status_card, text="VRR Range:  —",
-                             font=('SF Pro Text', 11),
+                             font=('SF Pro Text', 10),
                              fg=self.fg, bg=bg_card)
-        vrr_label.pack(anchor='w', pady=(2, 2))
+        vrr_label.pack(anchor='w', pady=(1, 1))
 
         mrefresh_label = tk.Label(status_card, text="Measured Refresh:  click Refresh",
-                                  font=('SF Pro Text', 11),
+                                  font=('SF Pro Text', 10),
                                   fg=self.fg, bg=bg_card)
-        mrefresh_label.pack(anchor='w', pady=(2, 2))
+        mrefresh_label.pack(anchor='w', pady=(1, 1))
 
         link_label = tk.Label(status_card, text="Link Status:  —",
-                              font=('SF Pro Text', 11),
+                              font=('SF Pro Text', 10),
                               fg=fg_muted, bg=bg_card)
-        link_label.pack(anchor='w', pady=(2, 10))
+        link_label.pack(anchor='w', pady=(1, 6))
 
         def _do_refresh():
             self.refresh_signal_panel(idx, connector_name)
@@ -26135,7 +26135,7 @@ sudo -n umr --version
         force_card.grid(row=0, column=1, sticky='nsew', padx=(6, 12), pady=6)
 
         f_header = tk.Frame(force_card, bg=bg_card)
-        f_header.pack(fill=tk.X, pady=(0, 10))
+        f_header.pack(fill=tk.X, pady=(0, 8))
         tk.Label(f_header, text="Force Link Depth",
                  font=('SF Pro Text', 12, 'bold'),
                  fg=self.fg, bg=bg_card).pack(side='left')
