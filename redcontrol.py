@@ -26075,13 +26075,37 @@ sudo -n umr --version
                                 fg=self.fg, bg=bg_card)
         srcfmt_label.pack(anchor='w', pady=(2, 2))
 
+        gamma_label = tk.Label(status_card, text="Color LUTs:  —",
+                               font=('SF Pro Text', 11),
+                               fg=self.fg, bg=bg_card)
+        gamma_label.pack(anchor='w', pady=(2, 2))
+
+        dsc_label = tk.Label(status_card, text="DSC:  —",
+                             font=('SF Pro Text', 11),
+                             fg=self.fg, bg=bg_card)
+        dsc_label.pack(anchor='w', pady=(2, 2))
+
+        vrr_label = tk.Label(status_card, text="VRR Range:  —",
+                             font=('SF Pro Text', 11),
+                             fg=self.fg, bg=bg_card)
+        vrr_label.pack(anchor='w', pady=(2, 2))
+
+        mrefresh_label = tk.Label(status_card, text="Measured Refresh:  click Refresh",
+                                  font=('SF Pro Text', 11),
+                                  fg=self.fg, bg=bg_card)
+        mrefresh_label.pack(anchor='w', pady=(2, 2))
+
         link_label = tk.Label(status_card, text="Link Status:  —",
                               font=('SF Pro Text', 11),
                               fg=fg_muted, bg=bg_card)
         link_label.pack(anchor='w', pady=(2, 10))
 
+        def _do_refresh():
+            self.refresh_signal_panel(idx, connector_name)
+            self.measure_refresh_rate(idx)
+
         refresh_btn = tk.Button(status_card, text="⟳  Refresh",
-                                command=lambda: self.refresh_signal_panel(idx, connector_name),
+                                command=_do_refresh,
                                 font=('SF Pro Text', 10),
                                 bg=bg_card, fg=self.fg,
                                 activebackground=self.theme.get('bg_panel', bg_card),
@@ -26182,6 +26206,11 @@ sudo -n umr --version
             'lanes_label': lanes_label,
             'dplink_label': dplink_label,
             'srcfmt_label': srcfmt_label,
+            'gamma_label': gamma_label,
+            'dsc_label': dsc_label,
+            'vrr_label': vrr_label,
+            'mrefresh_label': mrefresh_label,
+            'active_pipe': None,
             'pin_var': pin_var,
             'pinned_label': None,
             'link_label': link_label,
@@ -26240,6 +26269,10 @@ sudo -n umr --version
             w['lanes_label'].config(text="Active Lanes:  —")
             w['dplink_label'].config(text="Link Config:  —")
             w['srcfmt_label'].config(text="Source Framebuffer:  —")
+            w['gamma_label'].config(text="Color LUTs:  —")
+            w['dsc_label'].config(text="DSC:  —")
+            w['vrr_label'].config(text="VRR Range:  —")
+            w['mrefresh_label'].config(text="Measured Refresh:  —")
             w['link_label'].config(text="Link Status:  —")
             w['force_box'].configure(state='disabled')
             if not values:
@@ -26326,6 +26359,43 @@ sudo -n umr --version
         else:
             w['srcfmt_label'].config(
                 text=f"Source Framebuffer:  {fmt_names.get(fmt_raw, f'format {fmt_raw}')}")
+        w['active_pipe'] = pipe
+
+        # Color-management LUTs touching this pipe (driver gamma/CM stages)
+        luts = []
+        cm = self.read_umr_bitfields(f"mmCM{pipe}_CM_GAMCOR_CONTROL",
+                                     ["CM_GAMCOR_MODE"]) or {}
+        if cm.get("CM_GAMCOR_MODE"):
+            luts.append("gamma correction")
+        sh = self.read_umr_bitfields(f"mmCM{pipe}_CM_SHAPER_CONTROL",
+                                     ["CM_SHAPER_LUT_MODE", "CM_SHAPER_MODE"]) or {}
+        if sh.get("CM_SHAPER_LUT_MODE") or sh.get("CM_SHAPER_MODE"):
+            luts.append("shaper")
+        og = self.read_umr_bitfields(f"mmMPCC_OGAM{pipe}_MPCC_OGAM_CONTROL",
+                                     ["MPCC_OGAM_MODE"]) or {}
+        if og.get("MPCC_OGAM_MODE"):
+            luts.append("output gamma")
+        if not (cm or sh or og):
+            w['gamma_label'].config(text="Color LUTs:  unknown")
+        elif luts:
+            w['gamma_label'].config(text=f"Color LUTs:  active ({', '.join(luts)})")
+        else:
+            w['gamma_label'].config(text="Color LUTs:  all bypassed")
+
+        # DSC (DP-only compression) from amdgpu debugfs
+        if info['mode'] == 'DP':
+            dsc = self.read_connector_debugfs(enc_connector, 'dsc_clock_en')
+            if dsc is None:
+                w['dsc_label'].config(text="DSC:  unknown")
+            else:
+                on = dsc.strip().splitlines()[0].strip() not in ("0", "")
+                w['dsc_label'].config(text=f"DSC:  {'On (compressed!)' if on else 'Off'}")
+        else:
+            w['dsc_label'].config(text="DSC:  — (DP only)")
+
+        # FreeSync / VRR range
+        vrr = self.get_vrr_range(enc_connector)
+        w['vrr_label'].config(text=f"VRR Range:  {vrr if vrr else 'unknown'}")
 
         # Adapt the force dropdown to the encoder type
         if info['mode'] == 'DP':
@@ -26448,22 +26518,26 @@ sudo -n umr --version
             self.show_status("HDMI deep color reverted", "info")
         self.refresh_signal_panel(idx, connector_name, redetect=False)
 
-    def get_dp_link_settings(self, connector_name):
-        """Lane count / link rate for a DP connector from amdgpu debugfs."""
+    def read_connector_debugfs(self, connector_name, filename):
+        """Read an amdgpu per-connector debugfs file; returns text or None.
+
+        Maps X11 connector names (DisplayPort-0, HDMI-A-0) to DRM debugfs
+        names (DP-1, HDMI-A-1) and prefers the selected GPU's debugfs dir.
+        """
         try:
-            mapping = {
-                'DisplayPort-0': 'DP-1', 'DisplayPort-1': 'DP-2',
-                'DisplayPort-2': 'DP-3', 'DisplayPort-3': 'DP-4',
-                'DisplayPort-4': 'DP-5', 'DisplayPort-5': 'DP-6',
-            }
-            if connector_name in mapping:
-                drm_name = mapping[connector_name]
-            elif connector_name and connector_name.startswith(('DP-', 'eDP')):
-                drm_name = connector_name
+            drm_name = None
+            m = re.match(r'DisplayPort-(\d+)$', connector_name or '')
+            if m:
+                drm_name = f"DP-{int(m.group(1)) + 1}"
             else:
+                m = re.match(r'HDMI-A-(\d+)$', connector_name or '')
+                if m:
+                    drm_name = f"HDMI-A-{int(m.group(1)) + 1}"
+                elif connector_name and connector_name.startswith(('DP-', 'eDP', 'HDMI-A-')):
+                    drm_name = connector_name
+            if not drm_name:
                 return None
 
-            # Prefer the selected GPU's debugfs dir when we know its PCI address
             pci = None
             try:
                 pci = self.get_pci_address_for_instance(self.gpu_instance)
@@ -26472,7 +26546,7 @@ sudo -n umr --version
 
             find = subprocess.run(
                 ['sudo', '-n', 'find', '/sys/kernel/debug/dri', '-maxdepth', '3',
-                 '-name', 'link_settings'],
+                 '-name', filename],
                 capture_output=True, text=True, timeout=3)
             candidates = [p for p in find.stdout.split() if f"/{drm_name}/" in p]
             if pci:
@@ -26483,22 +26557,86 @@ sudo -n umr --version
                 cat = subprocess.run(['sudo', '-n', 'cat', path],
                                      capture_output=True, text=True, timeout=3)
                 txt = cat.stdout.strip()
-                if not txt:
-                    continue
-                line = txt.splitlines()[0].strip()
-                # Annotate the raw link-rate code with its common name
-                rate_names = {0x06: "RBR 1.62 Gbps", 0x0a: "HBR 2.7 Gbps",
-                              0x14: "HBR2 5.4 Gbps", 0x1e: "HBR3 8.1 Gbps"}
-                m = re.search(r'0x([0-9a-fA-F]+)', line)
-                if m:
-                    rate = rate_names.get(int(m.group(1), 16))
-                    if rate:
-                        line += f"  ({rate}/lane)"
-                return line
+                if txt:
+                    return txt
             return None
         except Exception as e:
-            console_print(f"DEBUG: get_dp_link_settings failed: {e}")
+            console_print(f"DEBUG: read_connector_debugfs({filename}) failed: {e}")
             return None
+
+    def get_dp_link_settings(self, connector_name):
+        """Lane count / link rate for a DP connector from amdgpu debugfs."""
+        txt = self.read_connector_debugfs(connector_name, 'link_settings')
+        if not txt:
+            return None
+        line = txt.splitlines()[0].strip()
+        # Annotate the raw link-rate code with its common name
+        rate_names = {0x06: "RBR 1.62 Gbps", 0x0a: "HBR 2.7 Gbps",
+                      0x14: "HBR2 5.4 Gbps", 0x1e: "HBR3 8.1 Gbps"}
+        m = re.search(r'0x([0-9a-fA-F]+)', line)
+        if m:
+            rate = rate_names.get(int(m.group(1), 16))
+            if rate:
+                line += f"  ({rate}/lane)"
+        return line
+
+    def get_vrr_range(self, connector_name):
+        """FreeSync/VRR min–max from amdgpu debugfs; None if unreadable."""
+        txt = self.read_connector_debugfs(connector_name, 'vrr_range')
+        if not txt:
+            return None
+        lo = re.search(r'Min:\s*(\d+)', txt)
+        hi = re.search(r'Max:\s*(\d+)', txt)
+        if not (lo and hi):
+            return None
+        lo, hi = int(lo.group(1)), int(hi.group(1))
+        if lo == 0 and hi == 0:
+            return "not supported"
+        return f"{lo}–{hi} Hz"
+
+    def measure_refresh_rate(self, idx):
+        """Measure the true refresh rate by sampling the OTG frame counter.
+
+        Non-blocking: takes one counter sample now and one ~2 s later via
+        root.after, then computes frames/second. More precise than xrandr's
+        rounded mode line; jitter from the umr round-trip keeps it approximate.
+        """
+        import time as _time
+
+        w = self.dp_widgets.get(idx)
+        if not w:
+            return
+        pipe = w.get('active_pipe')
+        if pipe is None:
+            pipe = idx
+
+        w['mrefresh_label'].config(text="Measured Refresh:  measuring…")
+
+        t0a = _time.monotonic()
+        r0 = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_STATUS_FRAME_COUNT",
+                                     ["OTG_FRAME_COUNT"])
+        t0b = _time.monotonic()
+        if not r0:
+            w['mrefresh_label'].config(text="Measured Refresh:  unavailable")
+            return
+        t0 = (t0a + t0b) / 2
+
+        def _finish():
+            t1a = _time.monotonic()
+            r1 = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_STATUS_FRAME_COUNT",
+                                         ["OTG_FRAME_COUNT"])
+            t1b = _time.monotonic()
+            if not r1:
+                w['mrefresh_label'].config(text="Measured Refresh:  unavailable")
+                return
+            frames = (r1["OTG_FRAME_COUNT"] - r0["OTG_FRAME_COUNT"]) & 0xFFFFFF
+            dt = ((t1a + t1b) / 2) - t0
+            if dt <= 0 or frames <= 0:
+                w['mrefresh_label'].config(text="Measured Refresh:  unavailable")
+                return
+            w['mrefresh_label'].config(text=f"Measured Refresh:  ≈{frames / dt:.2f} Hz")
+
+        self.root.after(2000, _finish)
 
     def toggle_signal_pin(self, idx, connector_name):
         """Enable/disable the auto-reapply watchdog for this output's forced depth."""
