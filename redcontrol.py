@@ -26085,6 +26085,16 @@ sudo -n umr --version
                              fg=self.fg, bg=bg_card)
         csc_label.pack(anchor='w', pady=(2, 2))
 
+        scaler_label = tk.Label(status_card, text="Scaler:  —",
+                                font=('SF Pro Text', 11),
+                                fg=self.fg, bg=bg_card)
+        scaler_label.pack(anchor='w', pady=(2, 2))
+
+        drr_label = tk.Label(status_card, text="Refresh Timing:  —",
+                             font=('SF Pro Text', 11),
+                             fg=self.fg, bg=bg_card)
+        drr_label.pack(anchor='w', pady=(2, 2))
+
         dsc_label = tk.Label(status_card, text="DSC:  —",
                              font=('SF Pro Text', 11),
                              fg=self.fg, bg=bg_card)
@@ -26228,6 +26238,30 @@ sudo -n umr --version
         self.create_info_icon(lut_row, title="Bypass Color LUTs", body=lut_info,
                               bg=bg_card).pack(side='left', padx=(8, 0))
 
+        # Dynamic expansion (FMT range expansion stage) — synced from hardware
+        dynexp_row = tk.Frame(force_card, bg=bg_card)
+        dynexp_row.pack(anchor='w', pady=(10, 0))
+        tk.Label(dynexp_row, text="Dynamic Expansion",
+                 font=('SF Pro Text', 12), fg=self.fg, bg=bg_card).pack(side='left')
+        dynexp_var = tk.BooleanVar(value=False)
+        dynexp_switch = ToggleSwitch(
+            dynexp_row, dynexp_var,
+            command=lambda: self.toggle_dynamic_expansion(idx, connector_name),
+            bg=bg_card)
+        dynexp_switch.pack(side='left', padx=(16, 0))
+        dynexp_info = (
+            "FMT_DYNAMIC_EXP expands pixel values from the internal precision to the "
+            "output range before the encoder — one more conversion stage between your "
+            "framebuffer and the wire, typically enabled by the driver.\n\n"
+            "Turn it off for the most literal, unexpanded pass-through of pixel "
+            "values. Depending on content and depth this can make the image slightly "
+            "darker or shift levels (values are no longer stretched to full range) — "
+            "toggle it back if you don't like the result. The switch reflects the "
+            "live register state on every Refresh."
+        )
+        self.create_info_icon(dynexp_row, title="Dynamic Expansion", body=dynexp_info,
+                              bg=bg_card).pack(side='left', padx=(8, 0))
+
         self.dp_widgets[idx] = {
             'encoder_var': encoder_var,
             'encoder_box': encoder_box,
@@ -26241,8 +26275,11 @@ sudo -n umr --version
             'srcfmt_label': srcfmt_label,
             'gamma_label': gamma_label,
             'csc_label': csc_label,
+            'scaler_label': scaler_label,
+            'drr_label': drr_label,
             'lut_bypass_var': lut_bypass_var,
             'lut_saved': None,
+            'dynexp_var': dynexp_var,
             'dsc_label': dsc_label,
             'vrr_label': vrr_label,
             'mrefresh_label': mrefresh_label,
@@ -26307,6 +26344,8 @@ sudo -n umr --version
             w['srcfmt_label'].config(text="Source Framebuffer:  —")
             w['gamma_label'].config(text="Color LUTs:  —")
             w['csc_label'].config(text="CSC / Gamut:  —")
+            w['scaler_label'].config(text="Scaler:  —")
+            w['drr_label'].config(text="Refresh Timing:  —")
             w['dsc_label'].config(text="DSC:  —")
             w['vrr_label'].config(text="VRR Range:  —")
             w['mrefresh_label'].config(text="Measured Refresh:  —")
@@ -26438,6 +26477,32 @@ sudo -n umr --version
             csc_txt = "output CSC active" if csc.get("MPC_OCSC_MODE") else "output CSC bypassed"
             gr_txt = "gamut remap active" if gr.get("CM_GAMUT_REMAP_MODE") else "gamut remap off"
             w['csc_label'].config(text=f"CSC / Gamut:  {csc_txt} · {gr_txt}")
+
+        # Scaler (DSCL) — interpolation only happens when not at native res
+        scl = self.read_umr_bitfields(f"mmDSCL{pipe}_SCL_MODE", ["DSCL_MODE"]) or {}
+        scl_mode = scl.get("DSCL_MODE")
+        if scl_mode is None:
+            w['scaler_label'].config(text="Scaler:  unknown")
+        elif scl_mode == 0:
+            w['scaler_label'].config(text="Scaler:  bypassed (1:1 native)")
+        else:
+            w['scaler_label'].config(text=f"Scaler:  active (mode {scl_mode} — interpolating)")
+
+        # Refresh timing: fixed vs variable V-total (DRR/VRR frame modulation)
+        vt = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_V_TOTAL_CONTROL",
+                                     ["OTG_V_TOTAL_MIN_SEL", "OTG_V_TOTAL_MAX_SEL"]) or {}
+        if not vt:
+            w['drr_label'].config(text="Refresh Timing:  unknown")
+        elif vt.get("OTG_V_TOTAL_MIN_SEL") or vt.get("OTG_V_TOTAL_MAX_SEL"):
+            w['drr_label'].config(text="Refresh Timing:  variable V-total (DRR active)")
+        else:
+            w['drr_label'].config(text="Refresh Timing:  fixed V-total")
+
+        # Dynamic expansion state → sync the toggle (no command fires on .set())
+        de = self.read_umr_bitfields(f"mmFMT{pipe}_FMT_DYNAMIC_EXP_CNTL",
+                                     ["FMT_DYNAMIC_EXP_EN"]) or {}
+        if "FMT_DYNAMIC_EXP_EN" in de:
+            w['dynexp_var'].set(de["FMT_DYNAMIC_EXP_EN"] == 1)
 
         # DSC (DP-only compression) from amdgpu debugfs
         if info['mode'] == 'DP':
@@ -26650,6 +26715,24 @@ sudo -n umr --version
         if lo == 0 and hi == 0:
             return "not supported"
         return f"{lo}–{hi} Hz"
+
+    def toggle_dynamic_expansion(self, idx, connector_name):
+        """Enable/disable the FMT dynamic-expansion (range conversion) stage."""
+        w = self.dp_widgets.get(idx)
+        if not w:
+            return
+        pipe = w.get('active_pipe')
+        if pipe is None:
+            pipe = idx
+        val = 1 if w['dynexp_var'].get() else 0
+        path = f"{self.asic_name}.{self.block_name}.mmFMT{pipe}_FMT_DYNAMIC_EXP_CNTL"
+        self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                              f"{path}.FMT_DYNAMIC_EXP_EN", str(val)])
+        self.log_command(f"{connector_name}: Dynamic Expansion",
+                         "ON" if not val else "OFF",
+                         f"umr -wb {path}.FMT_DYNAMIC_EXP_EN {val}",
+                         "ON" if val else "OFF", success=True)
+        self.show_status(f"Dynamic expansion {'enabled' if val else 'disabled'}", "info")
 
     def toggle_lut_bypass(self, idx, connector_name):
         """Bypass (or restore) the driver's gamma/LUT stages on this pipe."""
