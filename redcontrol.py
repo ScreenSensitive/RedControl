@@ -26170,9 +26170,18 @@ sudo -n umr --version
         w['active_mode'] = info['mode']
         suffix = "" if info.get('source') is None else f"  (CRTC {info['source']})"
         w['encoder_var'].set(f"DIG{enc} · {info['mode']}")
+        # Resolve which connector the *selected* encoder feeds (via its source
+        # CRTC), so the DP++ label follows the encoder, not this monitor's tab.
+        enc_connector = connector_name
+        src = info.get('source')
+        if src is not None:
+            for _out in self.active_outputs.values():
+                if _out.get('index') == src and _out.get('connector'):
+                    enc_connector = _out['connector']
+                    break
         if info['mode'] == 'DP':
             link_type = "DisplayPort"
-        elif connector_name and connector_name.startswith(('DisplayPort', 'DP-')):
+        elif enc_connector and enc_connector.startswith(('DisplayPort', 'DP-')):
             # DP++ dual-mode: the DP port is outputting TMDS through a
             # passive DP→HDMI adapter/cable, so the link really is HDMI.
             link_type = "HDMI / TMDS (DP++ — adapter converts to HDMI)"
