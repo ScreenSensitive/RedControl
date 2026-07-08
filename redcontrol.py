@@ -26252,6 +26252,37 @@ sudo -n umr --version
         self.create_info_icon(dynexp_row, title="Dynamic Expansion", body=dynexp_info,
                               bg=bg_card).pack(side='left', padx=(8, 0))
 
+        # Static Signal Test — prove the output has zero temporal modulation
+        crc_row = tk.Frame(force_card, bg=bg_card)
+        crc_row.pack(anchor='w', pady=(16, 0))
+        crc_btn = tk.Button(crc_row, text="▶  Static Signal Test",
+                            command=lambda: self.run_static_signal_test(idx, connector_name),
+                            font=('SF Pro Text', 10),
+                            bg=bg_card, fg=self.fg,
+                            activebackground=self.theme.get('bg_panel', bg_card),
+                            activeforeground=self.fg,
+                            relief='flat', padx=12, pady=4, cursor='hand2',
+                            highlightthickness=1,
+                            highlightbackground=self.theme.get('border', '#E5E5EA'))
+        crc_btn.pack(side='left')
+        crc_info = (
+            "Uses the display controller's CRC engine to hash every frame leaving this "
+            "pipe — after dithering, LUTs, truncation, everything — and compares about "
+            "a dozen samples over ~1.5 seconds.\n\n"
+            "All CRCs identical → the signal is provably static: zero temporal "
+            "dithering or modulation of any kind.\n\n"
+            "Keep the screen completely still during the test: a blinking text cursor, "
+            "animation, clock tick, or notification also changes frames and will "
+            "report CHANGING even if dithering is off."
+        )
+        self.create_info_icon(crc_row, title="Static Signal Test", body=crc_info,
+                              bg=bg_card).pack(side='left', padx=(8, 0))
+
+        crc_label = tk.Label(force_card, text="",
+                             font=('SF Pro Text', 10), fg=fg_muted, bg=bg_card,
+                             justify=tk.LEFT)
+        crc_label.pack(anchor='w', pady=(6, 0))
+
         self.dp_widgets[idx] = {
             'encoder_var': encoder_var,
             'encoder_box': encoder_box,
@@ -26269,6 +26300,7 @@ sudo -n umr --version
             'lut_bypass_var': lut_bypass_var,
             'lut_saved': None,
             'dynexp_var': dynexp_var,
+            'crc_label': crc_label,
             'dsc_label': dsc_label,
             'mrefresh_label': mrefresh_label,
             'active_pipe': None,
@@ -26699,6 +26731,60 @@ sudo -n umr --version
         if lo == 0 and hi == 0:
             return "not supported"
         return f"{lo}–{hi} Hz"
+
+    def run_static_signal_test(self, idx, connector_name):
+        """CRC-hash ~12 output frames and report whether they are identical."""
+        w = self.dp_widgets.get(idx)
+        if not w:
+            return
+        pipe = w.get('active_pipe')
+        if pipe is None:
+            pipe = idx
+
+        base = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC_CNTL"
+        self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                              f"{base}.OTG_CRC_CONT_EN", "1"])
+        self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                              f"{base}.OTG_CRC_EN", "1"])
+        self.log_command(f"{connector_name}: Static Signal Test", "-",
+                         f"umr -wb {base}.OTG_CRC_EN 1 (CRC capture)", "running", success=True)
+
+        samples = []
+        w['crc_label'].config(text="Testing…  keep the screen completely still")
+
+        def _sample(n=0):
+            rg = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_CRC0_DATA_RG",
+                                         ["CRC0_R_CR", "CRC0_G_Y"]) or {}
+            b = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_CRC0_DATA_B",
+                                        ["CRC0_B_CB"]) or {}
+            if rg or b:
+                samples.append((rg.get("CRC0_R_CR"), rg.get("CRC0_G_Y"),
+                                b.get("CRC0_B_CB")))
+            if n < 11:
+                self.root.after(120, lambda: _sample(n + 1))
+                return
+            # done — switch the CRC engine back off
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{base}.OTG_CRC_EN", "0"])
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{base}.OTG_CRC_CONT_EN", "0"])
+            valid = [s for s in samples if any(v for v in s if v)]
+            if not valid:
+                w['crc_label'].config(text="Result:  no CRC data captured — try again")
+                return
+            uniq = len(set(valid))
+            if uniq == 1:
+                w['crc_label'].config(
+                    text=f"Result:  STATIC ✓  ({len(valid)} samples, every frame identical)")
+                self.show_status("Static signal confirmed — no temporal modulation", "info")
+            else:
+                w['crc_label'].config(
+                    text=f"Result:  CHANGING  ({uniq} distinct frames in {len(valid)} samples)\n"
+                         "Temporal dithering, DRR, or on-screen content is modulating frames.")
+                self.show_status("Signal is changing frame-to-frame", "warn")
+
+        # give the CRC engine a frame or two to start producing data
+        self.root.after(300, lambda: _sample())
 
     def toggle_dynamic_expansion(self, idx, connector_name):
         """Enable/disable the FMT dynamic-expansion (range conversion) stage."""
