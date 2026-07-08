@@ -25940,15 +25940,19 @@ sudo -n umr --version
                     'encoding': self.DP_ENCODING_MAP.get(enc_raw, f"Unknown ({enc_raw})"),
                     'depth': self.DP_DEPTH_MAP.get(depth_raw, f"Unknown ({depth_raw})"),
                     'depth_raw': depth_raw,
+                    'deep_en': None,
+                    'scramble': None,
+                    'clock_rate': None,
                 })
             else:
                 hc = self.read_umr_bitfields(
                     f"mmDIG{n}_HDMI_CONTROL",
-                    ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH"]) or {}
+                    ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH",
+                     "HDMI_DATA_SCRAMBLE_EN", "HDMI_CLOCK_CHANNEL_RATE"]) or {}
                 deep_en = hc.get("HDMI_DEEP_COLOR_ENABLE")
                 depth_raw = hc.get("HDMI_DEEP_COLOR_DEPTH")
                 if deep_en == 0:
-                    depth = "8 bpc (deep color off)"
+                    depth = "8 bpc"
                 else:
                     depth = self.HDMI_DEPTH_MAP.get(depth_raw, f"Unknown ({depth_raw})")
                 tmds_raw = fe.get("TMDS_COLOR_FORMAT")
@@ -25959,6 +25963,9 @@ sudo -n umr --version
                     'encoding': self.TMDS_FORMAT_MAP.get(tmds_raw, f"Unknown ({tmds_raw})"),
                     'depth': depth,
                     'depth_raw': depth_raw if deep_en else 0,
+                    'deep_en': deep_en,
+                    'scramble': hc.get("HDMI_DATA_SCRAMBLE_EN"),
+                    'clock_rate': hc.get("HDMI_CLOCK_CHANNEL_RATE"),
                 })
             console_print(f"DEBUG: DIG{n} active ({found[-1]['mode']}), "
                           f"source CRTC={found[-1]['source']}, "
@@ -26036,6 +26043,16 @@ sudo -n umr --version
                                fg=self.fg, bg=bg_card)
         depth_label.pack(anchor='w', pady=(2, 2))
 
+        deep_label = tk.Label(status_card, text="Deep Color:  —",
+                              font=('SF Pro Text', 11),
+                              fg=self.fg, bg=bg_card)
+        deep_label.pack(anchor='w', pady=(2, 2))
+
+        tmds_label = tk.Label(status_card, text="TMDS Clock:  —",
+                              font=('SF Pro Text', 11),
+                              fg=self.fg, bg=bg_card)
+        tmds_label.pack(anchor='w', pady=(2, 2))
+
         link_label = tk.Label(status_card, text="Link Status:  —",
                               font=('SF Pro Text', 11),
                               fg=fg_muted, bg=bg_card)
@@ -26095,6 +26112,11 @@ sudo -n umr --version
         force_box.pack(anchor='w', pady=(0, 8))
         force_box.bind('<<ComboboxSelected>>',
                        lambda e: self.force_signal_depth(idx, connector_name))
+        # A stray scroll over these boxes would change the value and fire a
+        # register write — swallow wheel events on both.
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            force_box.bind(_seq, lambda e: "break")
+            encoder_box.bind(_seq, lambda e: "break")
 
         force_note = tk.Label(force_card,
                               text="Applied instantly on the live link.\n"
@@ -26109,6 +26131,8 @@ sudo -n umr --version
             'mode_label': mode_label,
             'encoding_label': encoding_label,
             'depth_label': depth_label,
+            'deep_label': deep_label,
+            'tmds_label': tmds_label,
             'link_label': link_label,
             'force_depth_var': force_depth_var,
             'force_box': force_box,
@@ -26160,6 +26184,8 @@ sudo -n umr --version
             w['mode_label'].config(text="Link Type:  —")
             w['encoding_label'].config(text="Pixel Encoding:  no active encoder found")
             w['depth_label'].config(text="Depth on Link:  —")
+            w['deep_label'].config(text="Deep Color:  —")
+            w['tmds_label'].config(text="TMDS Clock:  —")
             w['link_label'].config(text="Link Status:  —")
             w['force_box'].configure(state='disabled')
             if not values:
@@ -26191,6 +26217,27 @@ sudo -n umr --version
         w['encoding_label'].config(text=f"Pixel Encoding:  {info['encoding']}")
         w['depth_label'].config(text=f"Depth on Link:  {info['depth']}")
         w['current_depth'] = info['depth']
+
+        # HDMI-only detail lines (deep color state + TMDS clock/scrambling)
+        if info['mode'] == 'HDMI':
+            deep_en = info.get('deep_en')
+            if deep_en is None:
+                w['deep_label'].config(text="Deep Color:  unknown")
+            elif deep_en == 1:
+                w['deep_label'].config(text=f"Deep Color:  On ({info['depth']})")
+            else:
+                w['deep_label'].config(text="Deep Color:  Off (standard 8 bpc)")
+            scramble = info.get('scramble')
+            clock_rate = info.get('clock_rate')
+            if scramble is None and clock_rate is None:
+                w['tmds_label'].config(text="TMDS Clock:  unknown")
+            else:
+                rate = "1/40 (HDMI 2.0, >340 MHz)" if clock_rate == 1 else "1/10 (≤340 MHz)"
+                scr = "on" if scramble == 1 else "off"
+                w['tmds_label'].config(text=f"TMDS Clock:  {rate} · scrambling {scr}")
+        else:
+            w['deep_label'].config(text="Deep Color:  — (DP uses component depth)")
+            w['tmds_label'].config(text="TMDS Clock:  — (not a TMDS link)")
 
         # Adapt the force dropdown to the encoder type
         if info['mode'] == 'DP':
