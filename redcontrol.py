@@ -26090,20 +26090,10 @@ sudo -n umr --version
                                 fg=self.fg, bg=bg_card)
         scaler_label.pack(anchor='w', pady=(1, 1))
 
-        drr_label = tk.Label(status_card, text="Refresh Timing:  —",
-                             font=('SF Pro Text', 10),
-                             fg=self.fg, bg=bg_card)
-        drr_label.pack(anchor='w', pady=(1, 1))
-
         dsc_label = tk.Label(status_card, text="DSC:  —",
                              font=('SF Pro Text', 10),
                              fg=self.fg, bg=bg_card)
         dsc_label.pack(anchor='w', pady=(1, 1))
-
-        vrr_label = tk.Label(status_card, text="VRR Range:  —",
-                             font=('SF Pro Text', 10),
-                             fg=self.fg, bg=bg_card)
-        vrr_label.pack(anchor='w', pady=(1, 1))
 
         mrefresh_label = tk.Label(status_card, text="Measured Refresh:  click Refresh",
                                   font=('SF Pro Text', 10),
@@ -26276,12 +26266,10 @@ sudo -n umr --version
             'gamma_label': gamma_label,
             'csc_label': csc_label,
             'scaler_label': scaler_label,
-            'drr_label': drr_label,
             'lut_bypass_var': lut_bypass_var,
             'lut_saved': None,
             'dynexp_var': dynexp_var,
             'dsc_label': dsc_label,
-            'vrr_label': vrr_label,
             'mrefresh_label': mrefresh_label,
             'active_pipe': None,
             'pin_var': pin_var,
@@ -26345,9 +26333,7 @@ sudo -n umr --version
             w['gamma_label'].config(text="Color LUTs:  —")
             w['csc_label'].config(text="CSC / Gamut:  —")
             w['scaler_label'].config(text="Scaler:  —")
-            w['drr_label'].config(text="Refresh Timing:  —")
-            w['dsc_label'].config(text="DSC:  —")
-            w['vrr_label'].config(text="VRR Range:  —")
+            w['dsc_label'].config(text="DSC:  — · VRR:  —")
             w['mrefresh_label'].config(text="Measured Refresh:  —")
             w['link_label'].config(text="Link Status:  —")
             w['force_box'].configure(state='disabled')
@@ -26478,25 +26464,24 @@ sudo -n umr --version
             gr_txt = "gamut remap active" if gr.get("CM_GAMUT_REMAP_MODE") else "gamut remap off"
             w['csc_label'].config(text=f"CSC / Gamut:  {csc_txt} · {gr_txt}")
 
-        # Scaler (DSCL) — interpolation only happens when not at native res
+        # Scaler + refresh timing (interpolation / DRR frame modulation)
         scl = self.read_umr_bitfields(f"mmDSCL{pipe}_SCL_MODE", ["DSCL_MODE"]) or {}
         scl_mode = scl.get("DSCL_MODE")
         if scl_mode is None:
-            w['scaler_label'].config(text="Scaler:  unknown")
+            scl_txt = "unknown"
         elif scl_mode == 0:
-            w['scaler_label'].config(text="Scaler:  bypassed (1:1 native)")
+            scl_txt = "bypassed (native)"
         else:
-            w['scaler_label'].config(text=f"Scaler:  active (mode {scl_mode} — interpolating)")
-
-        # Refresh timing: fixed vs variable V-total (DRR/VRR frame modulation)
+            scl_txt = f"active (mode {scl_mode})"
         vt = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_V_TOTAL_CONTROL",
                                      ["OTG_V_TOTAL_MIN_SEL", "OTG_V_TOTAL_MAX_SEL"]) or {}
         if not vt:
-            w['drr_label'].config(text="Refresh Timing:  unknown")
+            vt_txt = "V-total unknown"
         elif vt.get("OTG_V_TOTAL_MIN_SEL") or vt.get("OTG_V_TOTAL_MAX_SEL"):
-            w['drr_label'].config(text="Refresh Timing:  variable V-total (DRR active)")
+            vt_txt = "variable V-total (DRR)"
         else:
-            w['drr_label'].config(text="Refresh Timing:  fixed V-total")
+            vt_txt = "fixed V-total"
+        w['scaler_label'].config(text=f"Scaler:  {scl_txt} · {vt_txt}")
 
         # Dynamic expansion state → sync the toggle (no command fires on .set())
         de = self.read_umr_bitfields(f"mmFMT{pipe}_FMT_DYNAMIC_EXP_CNTL",
@@ -26504,20 +26489,19 @@ sudo -n umr --version
         if "FMT_DYNAMIC_EXP_EN" in de:
             w['dynexp_var'].set(de["FMT_DYNAMIC_EXP_EN"] == 1)
 
-        # DSC (DP-only compression) from amdgpu debugfs
+        # DSC compression (DP only) + FreeSync/VRR range
         if info['mode'] == 'DP':
             dsc = self.read_connector_debugfs(enc_connector, 'dsc_clock_en')
             if dsc is None:
-                w['dsc_label'].config(text="DSC:  unknown")
+                dsc_txt = "unknown"
             else:
                 on = dsc.strip().splitlines()[0].strip() not in ("0", "")
-                w['dsc_label'].config(text=f"DSC:  {'On (compressed!)' if on else 'Off'}")
+                dsc_txt = "On (compressed!)" if on else "Off"
         else:
-            w['dsc_label'].config(text="DSC:  — (DP only)")
-
-        # FreeSync / VRR range
+            dsc_txt = "— (DP only)"
         vrr = self.get_vrr_range(enc_connector)
-        w['vrr_label'].config(text=f"VRR Range:  {vrr if vrr else 'unknown'}")
+        w['dsc_label'].config(
+            text=f"DSC:  {dsc_txt} · VRR:  {vrr if vrr else 'unknown'}")
 
         # Adapt the force dropdown to the encoder type
         if info['mode'] == 'DP':
