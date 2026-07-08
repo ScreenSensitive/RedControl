@@ -26081,12 +26081,13 @@ sudo -n umr --version
         force_info = (
             "Writes the encoder's depth field directly via UMR — no modeset, and it "
             "works on Wayland too.\n\n"
-            "DisplayPort: sets DP_COMPONENT_DEPTH on the stream encoder. Low risk — "
-            "applied instantly on the live link.\n\n"
-            "HDMI: sets HDMI_DEEP_COLOR_DEPTH / HDMI_DEEP_COLOR_ENABLE. Higher risk — "
-            "deep color changes the TMDS clock ratio, which normally requires link "
-            "retraining, so the picture may break until reverted. A confirmation "
-            "dialog auto-reverts after 15 seconds unless you keep the change.\n\n"
+            "DisplayPort: sets DP_COMPONENT_DEPTH on the stream encoder.\n"
+            "HDMI: sets HDMI_DEEP_COLOR_DEPTH / HDMI_DEEP_COLOR_ENABLE — riskier, "
+            "since deep color changes the TMDS clock ratio, which normally requires "
+            "link retraining.\n\n"
+            "Every force shows a Keep/Revert confirmation; if you don't answer "
+            "within 15 seconds (e.g. the screen went blank), it reverts "
+            "automatically.\n\n"
             "This is different from Max BPC in Color / Depth: Max BPC is a driver "
             "policy cap that takes effect at the next modeset; this changes what the "
             "encoder is packing on the wire right now.\n\n"
@@ -26119,7 +26120,7 @@ sudo -n umr --version
             encoder_box.bind(_seq, lambda e: "break")
 
         force_note = tk.Label(force_card,
-                              text="Applied instantly on the live link.\n"
+                              text="Confirm within 15 s or it reverts automatically.\n"
                                    "Reapply after any resolution or refresh change.",
                               font=('SF Pro Text', 9), fg=fg_muted, bg=bg_card,
                               justify=tk.LEFT)
@@ -26224,9 +26225,9 @@ sudo -n umr --version
             if deep_en is None:
                 w['deep_label'].config(text="Deep Color:  unknown")
             elif deep_en == 1:
-                w['deep_label'].config(text=f"Deep Color:  On ({info['depth']})")
+                w['deep_label'].config(text="Deep Color:  On")
             else:
-                w['deep_label'].config(text="Deep Color:  Off (standard 8 bpc)")
+                w['deep_label'].config(text="Deep Color:  Off")
             scramble = info.get('scramble')
             clock_rate = info.get('clock_rate')
             if scramble is None and clock_rate is None:
@@ -26242,12 +26243,10 @@ sudo -n umr --version
         # Adapt the force dropdown to the encoder type
         if info['mode'] == 'DP':
             depth_values = list(self.DP_DEPTH_MAP.values())
-            w['force_note'].config(text="Applied instantly on the live DP link.\n"
-                                        "Reapply after any resolution or refresh change.")
         else:
             depth_values = list(self.HDMI_DEPTH_MAP.values())
-            w['force_note'].config(text="HDMI deep color changes need TMDS retraining —\n"
-                                        "auto-reverts in 15 s unless you confirm.")
+        w['force_note'].config(text="Confirm within 15 s or it reverts automatically.\n"
+                                    "Reapply after any resolution or refresh change.")
         w['force_box'].configure(values=depth_values, state='readonly')
         if info['depth'] in depth_values:
             w['force_depth_var'].set(info['depth'])
@@ -26279,21 +26278,36 @@ sudo -n umr --version
             if val is None:
                 return
             path = f"{self.asic_name}.{self.block_name}.mmDP{enc}_DP_PIXEL_FORMAT"
-            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                                  f"{path}.DP_COMPONENT_DEPTH", str(val)])
-            command = f"umr -wb {path}.DP_COMPONENT_DEPTH {val}"
 
             pf = self.read_umr_bitfields(f"mmDP{enc}_DP_PIXEL_FORMAT",
                                          ["DP_COMPONENT_DEPTH"]) or {}
-            after_raw = pf.get("DP_COMPONENT_DEPTH")
-            after = self.DP_DEPTH_MAP.get(after_raw, f"Unknown ({after_raw})")
-            success = (after_raw == val)
-            self.log_command(f"{connector_name}: DP Component Depth",
-                             before, command, after, success=success)
-            if success:
-                self.show_status(f"DIG{enc} DP component depth → {after}", "info")
+            old_val = pf.get("DP_COMPONENT_DEPTH")
+            if old_val == val:
+                self.refresh_signal_panel(idx, connector_name, redetect=False)
+                return
+
+            def write_dp(v):
+                self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                      f"{path}.DP_COMPONENT_DEPTH", str(v)])
+
+            write_dp(val)
+            command = f"umr -wb {path}.DP_COMPONENT_DEPTH {val}"
+
+            def revert():
+                if old_val is not None:
+                    write_dp(old_val)
+                self.refresh_signal_panel(idx, connector_name, redetect=False)
+
+            kept = self.show_display_change_confirmation(
+                "DP Component Depth", before, label, revert)
+            if kept:
+                self.log_command(f"{connector_name}: DP Component Depth",
+                                 before, command, label, success=True)
+                self.show_status(f"DIG{enc} DP component depth → {label}", "info")
             else:
-                self.show_status(f"DIG{enc} depth write not accepted (still {after})", "error")
+                self.log_command(f"{connector_name}: DP Component Depth",
+                                 label, f"Reverted to {before}", before, success=True)
+                self.show_status("DP component depth reverted", "info")
             self.refresh_signal_panel(idx, connector_name, redetect=False)
             return
 
