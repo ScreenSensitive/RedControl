@@ -25925,6 +25925,11 @@ sudo -n umr --version
             if not fe or fe.get("DIG_SYMCLK_FE_ON") != 1:
                 continue
 
+            lanes_reg = self.read_umr_bitfields(
+                f"mmDIG{n}_DIG_LANE_ENABLE",
+                ["DIG_LANE0EN", "DIG_LANE1EN", "DIG_LANE2EN", "DIG_LANE3EN"]) or {}
+            lanes = sum(1 for v in lanes_reg.values() if v == 1) if lanes_reg else None
+
             dp = self.read_umr_bitfields(f"mmDP{n}_DP_VID_STREAM_CNTL",
                                          ["DP_VID_STREAM_ENABLE"]) or {}
             if dp.get("DP_VID_STREAM_ENABLE") == 1:
@@ -25943,6 +25948,7 @@ sudo -n umr --version
                     'deep_en': None,
                     'scramble': None,
                     'clock_rate': None,
+                    'lanes': lanes,
                 })
             else:
                 hc = self.read_umr_bitfields(
@@ -25966,6 +25972,7 @@ sudo -n umr --version
                     'deep_en': deep_en,
                     'scramble': hc.get("HDMI_DATA_SCRAMBLE_EN"),
                     'clock_rate': hc.get("HDMI_CLOCK_CHANNEL_RATE"),
+                    'lanes': lanes,
                 })
             console_print(f"DEBUG: DIG{n} active ({found[-1]['mode']}), "
                           f"source CRTC={found[-1]['source']}, "
@@ -26053,6 +26060,21 @@ sudo -n umr --version
                               fg=self.fg, bg=bg_card)
         tmds_label.pack(anchor='w', pady=(2, 2))
 
+        lanes_label = tk.Label(status_card, text="Active Lanes:  —",
+                               font=('SF Pro Text', 11),
+                               fg=self.fg, bg=bg_card)
+        lanes_label.pack(anchor='w', pady=(2, 2))
+
+        dplink_label = tk.Label(status_card, text="Link Config:  —",
+                                font=('SF Pro Text', 11),
+                                fg=self.fg, bg=bg_card)
+        dplink_label.pack(anchor='w', pady=(2, 2))
+
+        srcfmt_label = tk.Label(status_card, text="Source Framebuffer:  —",
+                                font=('SF Pro Text', 11),
+                                fg=self.fg, bg=bg_card)
+        srcfmt_label.pack(anchor='w', pady=(2, 2))
+
         link_label = tk.Label(status_card, text="Link Status:  —",
                               font=('SF Pro Text', 11),
                               fg=fg_muted, bg=bg_card)
@@ -26121,10 +26143,33 @@ sudo -n umr --version
 
         force_note = tk.Label(force_card,
                               text="Confirm within 15 s or it reverts automatically.\n"
-                                   "Reapply after any resolution or refresh change.",
+                                   "Pin below to survive resolution/refresh changes.",
                               font=('SF Pro Text', 9), fg=fg_muted, bg=bg_card,
                               justify=tk.LEFT)
         force_note.pack(anchor='w')
+
+        # Pin: watchdog reapplies the forced depth when the driver resets it
+        pin_row = tk.Frame(force_card, bg=bg_card)
+        pin_row.pack(anchor='w', pady=(14, 0))
+        tk.Label(pin_row, text="Pin (auto-reapply)",
+                 font=('SF Pro Text', 12), fg=self.fg, bg=bg_card).pack(side='left')
+        pin_var = tk.BooleanVar(value=False)
+        pin_switch = ToggleSwitch(
+            pin_row, pin_var,
+            command=lambda: self.toggle_signal_pin(idx, connector_name),
+            bg=bg_card)
+        pin_switch.pack(side='left', padx=(16, 0))
+        pin_info = (
+            "The driver rewrites the encoder registers on every modeset — resolution or "
+            "refresh change, monitor sleep/wake, sometimes GPU power events — which "
+            "silently undoes a forced depth.\n\n"
+            "Pin watches the register every few seconds and reapplies your forced depth "
+            "whenever the driver resets it. Reapplies are logged in the CMD Log.\n\n"
+            "Requires passwordless UMR access (Auto-Start → Passwordless Access), since "
+            "the watchdog can't prompt for a password in the background."
+        )
+        self.create_info_icon(pin_row, title="Pin", body=pin_info,
+                              bg=bg_card).pack(side='left', padx=(8, 0))
 
         self.dp_widgets[idx] = {
             'encoder_var': encoder_var,
@@ -26134,6 +26179,11 @@ sudo -n umr --version
             'depth_label': depth_label,
             'deep_label': deep_label,
             'tmds_label': tmds_label,
+            'lanes_label': lanes_label,
+            'dplink_label': dplink_label,
+            'srcfmt_label': srcfmt_label,
+            'pin_var': pin_var,
+            'pinned_label': None,
             'link_label': link_label,
             'force_depth_var': force_depth_var,
             'force_box': force_box,
@@ -26187,6 +26237,9 @@ sudo -n umr --version
             w['depth_label'].config(text="Depth on Link:  —")
             w['deep_label'].config(text="Deep Color:  —")
             w['tmds_label'].config(text="TMDS Clock:  —")
+            w['lanes_label'].config(text="Active Lanes:  —")
+            w['dplink_label'].config(text="Link Config:  —")
+            w['srcfmt_label'].config(text="Source Framebuffer:  —")
             w['link_label'].config(text="Link Status:  —")
             w['force_box'].configure(state='disabled')
             if not values:
@@ -26239,6 +26292,40 @@ sudo -n umr --version
         else:
             w['deep_label'].config(text="Deep Color:  — (DP uses component depth)")
             w['tmds_label'].config(text="TMDS Clock:  — (not a TMDS link)")
+
+        # Active lanes (from DIG_LANE_ENABLE)
+        lanes = info.get('lanes')
+        if lanes is None:
+            w['lanes_label'].config(text="Active Lanes:  unknown")
+        else:
+            w['lanes_label'].config(text=f"Active Lanes:  {lanes}")
+
+        # DP link configuration (lane count / rate from amdgpu debugfs)
+        if info['mode'] == 'DP':
+            link_cfg = self.get_dp_link_settings(enc_connector)
+            w['dplink_label'].config(
+                text=f"Link Config:  {link_cfg}" if link_cfg else "Link Config:  unknown")
+        else:
+            w['dplink_label'].config(text="Link Config:  — (not a DP link)")
+
+        # Source framebuffer format (what the compositor hands the pipe)
+        pipe = info.get('source')
+        if pipe is None:
+            pipe = idx
+        sf = self.read_umr_bitfields(f"mmHUBP{pipe}_DCSURF_SURFACE_CONFIG",
+                                     ["SURFACE_PIXEL_FORMAT"]) or {}
+        fmt_raw = sf.get("SURFACE_PIXEL_FORMAT")
+        fmt_names = {
+            8: "8-bit (ARGB8888)", 9: "8-bit (ABGR8888)",
+            10: "10-bit (ARGB2101010)", 11: "10-bit (ABGR2101010)",
+            22: "16-bit float (FP16)", 24: "16-bit float (ABGR16F)",
+            25: "16-bit (ARGB16161616)", 26: "16-bit (ABGR16161616)",
+        }
+        if fmt_raw is None:
+            w['srcfmt_label'].config(text="Source Framebuffer:  unknown")
+        else:
+            w['srcfmt_label'].config(
+                text=f"Source Framebuffer:  {fmt_names.get(fmt_raw, f'format {fmt_raw}')}")
 
         # Adapt the force dropdown to the encoder type
         if info['mode'] == 'DP':
@@ -26304,6 +26391,8 @@ sudo -n umr --version
                 self.log_command(f"{connector_name}: DP Component Depth",
                                  before, command, label, success=True)
                 self.show_status(f"DIG{enc} DP component depth → {label}", "info")
+                if w['pin_var'].get():
+                    w['pinned_label'] = label
             else:
                 self.log_command(f"{connector_name}: DP Component Depth",
                                  label, f"Reverted to {before}", before, success=True)
@@ -26351,10 +26440,162 @@ sudo -n umr --version
             self.log_command(f"{connector_name}: HDMI Deep Color",
                              before, command, label, success=True)
             self.show_status(f"DIG{enc} HDMI deep color → {label}", "info")
+            if w['pin_var'].get():
+                w['pinned_label'] = label
         else:
             self.log_command(f"{connector_name}: HDMI Deep Color",
                              label, f"Reverted to {before}", before, success=True)
             self.show_status("HDMI deep color reverted", "info")
+        self.refresh_signal_panel(idx, connector_name, redetect=False)
+
+    def get_dp_link_settings(self, connector_name):
+        """Lane count / link rate for a DP connector from amdgpu debugfs."""
+        try:
+            mapping = {
+                'DisplayPort-0': 'DP-1', 'DisplayPort-1': 'DP-2',
+                'DisplayPort-2': 'DP-3', 'DisplayPort-3': 'DP-4',
+                'DisplayPort-4': 'DP-5', 'DisplayPort-5': 'DP-6',
+            }
+            if connector_name in mapping:
+                drm_name = mapping[connector_name]
+            elif connector_name and connector_name.startswith(('DP-', 'eDP')):
+                drm_name = connector_name
+            else:
+                return None
+
+            # Prefer the selected GPU's debugfs dir when we know its PCI address
+            pci = None
+            try:
+                pci = self.get_pci_address_for_instance(self.gpu_instance)
+            except Exception:
+                pass
+
+            find = subprocess.run(
+                ['sudo', '-n', 'find', '/sys/kernel/debug/dri', '-maxdepth', '3',
+                 '-name', 'link_settings'],
+                capture_output=True, text=True, timeout=3)
+            candidates = [p for p in find.stdout.split() if f"/{drm_name}/" in p]
+            if pci:
+                preferred = [p for p in candidates if pci in p]
+                candidates = preferred or candidates
+
+            for path in candidates:
+                cat = subprocess.run(['sudo', '-n', 'cat', path],
+                                     capture_output=True, text=True, timeout=3)
+                txt = cat.stdout.strip()
+                if not txt:
+                    continue
+                line = txt.splitlines()[0].strip()
+                # Annotate the raw link-rate code with its common name
+                rate_names = {0x06: "RBR 1.62 Gbps", 0x0a: "HBR 2.7 Gbps",
+                              0x14: "HBR2 5.4 Gbps", 0x1e: "HBR3 8.1 Gbps"}
+                m = re.search(r'0x([0-9a-fA-F]+)', line)
+                if m:
+                    rate = rate_names.get(int(m.group(1), 16))
+                    if rate:
+                        line += f"  ({rate}/lane)"
+                return line
+            return None
+        except Exception as e:
+            console_print(f"DEBUG: get_dp_link_settings failed: {e}")
+            return None
+
+    def toggle_signal_pin(self, idx, connector_name):
+        """Enable/disable the auto-reapply watchdog for this output's forced depth."""
+        w = self.dp_widgets.get(idx)
+        if not w:
+            return
+        if w['pin_var'].get():
+            w['pinned_label'] = w['force_depth_var'].get()
+            self._start_signal_pin_watchdog()
+            self.show_status(
+                f"Pinned {w['pinned_label']} on {connector_name} — reapplies automatically", "info")
+        else:
+            w['pinned_label'] = None
+            self.show_status(f"Unpinned link depth for {connector_name}", "info")
+
+    def _start_signal_pin_watchdog(self):
+        if getattr(self, '_pin_watchdog_on', False):
+            return
+        self._pin_watchdog_on = True
+        self.root.after(5000, self._signal_pin_tick)
+
+    def _signal_pin_tick(self):
+        """Every 5 s: reapply any pinned depth the driver has reset."""
+        try:
+            pinned = [(idx, w) for idx, w in getattr(self, 'dp_widgets', {}).items()
+                      if w.get('pin_var') is not None and w['pin_var'].get()
+                      and w.get('pinned_label')]
+            # Never prompt for a password from a background timer
+            if pinned and (os.geteuid() == 0 or self.check_sudo_cached()):
+                for idx, w in pinned:
+                    try:
+                        self._pin_reapply_if_needed(idx, w)
+                    except Exception as e:
+                        self.log_debug(f"Pin reapply failed for idx {idx}: {e}")
+        except Exception:
+            pass
+        finally:
+            try:
+                self.root.after(5000, self._signal_pin_tick)
+            except Exception:
+                self._pin_watchdog_on = False
+
+    def _pin_reapply_if_needed(self, idx, w):
+        enc = w.get('active_encoder')
+        mode = w.get('active_mode')
+        label = w.get('pinned_label')
+        connector_name = self.monitor_connector_names.get(idx)
+
+        if enc is None or mode is None:
+            self.refresh_signal_panel(idx, connector_name)
+            return
+
+        # A modeset can move the pipe to a different DIG — validate before writing
+        fe = self.read_umr_bitfields(f"mmDIG{enc}_DIG_FE_CNTL",
+                                     ["DIG_SYMCLK_FE_ON", "DIG_SOURCE_SELECT"])
+        if not fe or fe.get("DIG_SYMCLK_FE_ON") != 1 or fe.get("DIG_SOURCE_SELECT") != idx:
+            self.refresh_signal_panel(idx, connector_name)
+            return
+
+        if mode == 'DP':
+            target = {v: k for k, v in self.DP_DEPTH_MAP.items()}.get(label)
+            if target is None:
+                return
+            pf = self.read_umr_bitfields(f"mmDP{enc}_DP_PIXEL_FORMAT",
+                                         ["DP_COMPONENT_DEPTH"])
+            if pf is None or pf.get("DP_COMPONENT_DEPTH") == target:
+                return
+            path = f"{self.asic_name}.{self.block_name}.mmDP{enc}_DP_PIXEL_FORMAT"
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{path}.DP_COMPONENT_DEPTH", str(target)])
+            self.log_command(f"{connector_name}: DP Component Depth (pin)",
+                             "driver reset",
+                             f"umr -wb {path}.DP_COMPONENT_DEPTH {target}",
+                             label, success=True)
+        else:
+            target = {v: k for k, v in self.HDMI_DEPTH_MAP.items()}.get(label)
+            if target is None:
+                return
+            want_en = 0 if target == 0 else 1
+            hc = self.read_umr_bitfields(f"mmDIG{enc}_HDMI_CONTROL",
+                                         ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH"])
+            if hc is None:
+                return
+            if (hc.get("HDMI_DEEP_COLOR_ENABLE") == want_en
+                    and (want_en == 0 or hc.get("HDMI_DEEP_COLOR_DEPTH") == target)):
+                return
+            path = f"{self.asic_name}.{self.block_name}.mmDIG{enc}_HDMI_CONTROL"
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{path}.HDMI_DEEP_COLOR_DEPTH", str(target)])
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{path}.HDMI_DEEP_COLOR_ENABLE", str(want_en)])
+            self.log_command(f"{connector_name}: HDMI Deep Color (pin)",
+                             "driver reset",
+                             f"umr -wb {path}.HDMI_DEEP_COLOR_DEPTH {target}; "
+                             f"umr -wb {path}.HDMI_DEEP_COLOR_ENABLE {want_en}",
+                             label, success=True)
+
         self.refresh_signal_panel(idx, connector_name, redetect=False)
 
     def apply_max_bpc(self, idx, connector_name):
