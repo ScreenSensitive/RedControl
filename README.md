@@ -71,8 +71,8 @@ Run as a normal user — UMR calls go through `sudo`, and the app can set up pas
 
 Open **Signal (DP / HDMI)** in the sidebar for any monitor:
 
-- **Live Signal** shows which DIG encoder drives the output (auto-matched via the DIG frontend's source CRTC), whether the link is DisplayPort or HDMI/TMDS — including HDMI carried over a DP++ port through a passive adapter — the pixel encoding, and the color depth actually on the wire.
-- **Force Link Depth** writes the encoder's depth field directly (`DP_COMPONENT_DEPTH` on DP, `HDMI_DEEP_COLOR_DEPTH`/`ENABLE` on HDMI). DP applies instantly; HDMI deep-color changes need TMDS retraining, so they go through a confirm-or-auto-revert dialog.
+- **Live Signal** shows which DIG encoder drives the output (auto-matched via the DIG frontend's source CRTC), whether the link is DisplayPort or HDMI/TMDS — including HDMI carried over a DP++ port through a passive adapter — the pixel encoding, and the color depth actually on the wire. Also: HDMI deep color & TMDS clock state, active lanes, DP link rate/lane config, the source framebuffer format (is your compositor 8-bit or 10-bit?), driver color-LUT activity (GAMCOR/shaper/output gamma), DSC compression state, VRR range, and a true refresh rate measured from the GPU's frame counter.
+- **Force Link Depth** writes the encoder's depth field directly (`DP_COMPONENT_DEPTH` on DP, `HDMI_DEEP_COLOR_DEPTH`/`ENABLE` on HDMI). Every force goes through a Keep/Revert dialog that auto-reverts in 15 s if unanswered. **Pin (auto-reapply)** keeps a forced depth alive: a watchdog reapplies it whenever the driver resets the register on a modeset or monitor sleep/wake.
 - **Why no 6 bpc on HDMI**: DisplayPort defines an 18-bit link format; HDMI's minimum is 24-bit RGB. For 6-bit output on HDMI, use Truncate → 6-bit or 6-bit spatial dithering — the wire stays 8 bpc but only 6 bits carry content.
 
 ## What changed in 2.1
