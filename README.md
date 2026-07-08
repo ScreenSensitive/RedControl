@@ -12,7 +12,7 @@ RedControl talks directly to the AMD display engine (DCN) through UMR — the Us
 
 - 🎛️ **Dithering Control** — enable/disable spatial and temporal dithering, RGB noise, highpass/frame random, with per-depth and per-mode settings on every output (HDMI, DisplayPort, eDP, DVI)
 - ✂️ **Color Truncation** — force a static signal by truncating/rounding to 6/8/10/12 bpc instead of dithering
-- ⇄ **DisplayPort Signal (new in 2.1)** — live view of the DP stream encoder: pixel encoding (RGB/YCbCr) and component depth actually sent on the link, with the ability to force `DP_COMPONENT_DEPTH` instantly — no modeset required
+- ⇄ **Signal panel (new in 2.1)** — live view of the DIG encoder driving each output: link type (DisplayPort, HDMI, or HDMI-over-DP++), pixel encoding (RGB/YCbCr) and the color depth actually on the wire. Force `DP_COMPONENT_DEPTH` (DP, 6–16 bpc) or `HDMI_DEEP_COLOR_DEPTH` (HDMI, 8–16 bpc) instantly — no modeset required; HDMI changes auto-revert in 15 s unless confirmed
 - 🎨 **Color / Depth** — max bpc, colorspace (BT.709/opRGB/BT.2020), RGB range (full/limited) per connector
 - 🖥️ **Multi-Monitor** — CRTC-based pipe mapping; each display configured independently
 - 🎮 **Multi-GPU** — automatic detection and switching between AMD GPUs
@@ -67,16 +67,17 @@ python3 redcontrol.py --debug    # verbose console output
 
 Run as a normal user — UMR calls go through `sudo`, and the app can set up passwordless access for the exact commands it needs (menu: Auto-Start → Passwordless Access).
 
-### DisplayPort Signal panel
+### Signal panel
 
-Select a DisplayPort/eDP monitor and open **DisplayPort Signal** in the sidebar:
+Open **Signal (DP / HDMI)** in the sidebar for any monitor:
 
-- **Live Signal** shows which DPx stream encoder drives the output (auto-matched via the DIG frontend's source CRTC), the pixel encoding (RGB 4:4:4, YCbCr 4:2:2/4:4:4/4:2:0), and the component depth on the link.
-- **Force Component Depth** writes the encoder's `DP_COMPONENT_DEPTH` field directly. Takes effect instantly; the driver reprograms it on any modeset, so reapply after resolution/refresh changes.
+- **Live Signal** shows which DIG encoder drives the output (auto-matched via the DIG frontend's source CRTC), whether the link is DisplayPort or HDMI/TMDS — including HDMI carried over a DP++ port through a passive adapter — the pixel encoding, and the color depth actually on the wire.
+- **Force Link Depth** writes the encoder's depth field directly (`DP_COMPONENT_DEPTH` on DP, `HDMI_DEEP_COLOR_DEPTH`/`ENABLE` on HDMI). DP applies instantly; HDMI deep-color changes need TMDS retraining, so they go through a confirm-or-auto-revert dialog.
+- **Why no 6 bpc on HDMI**: DisplayPort defines an 18-bit link format; HDMI's minimum is 24-bit RGB. For 6-bit output on HDMI, use Truncate → 6-bit or 6-bit spatial dithering — the wire stays 8 bpc but only 6 bits carry content.
 
 ## What changed in 2.1
 
-- **Added**: DisplayPort Signal section — DP stream encoder readout + component depth forcing via UMR
+- **Added**: Signal section — DIG encoder readout (DP & HDMI) with on-wire depth forcing via UMR, DP++ adapter detection
 - **Added**: mode-change confirmation dialog with 15-second auto-revert
 - **Removed**: EDID editor/viewer (spoofing, colorimetry patching, firmware EDID install) — out of scope for a signal-control tool; monitor names are still read from EDID
 - **Fixed**: outputs with untouched (power-on default) FMT registers — commonly DisplayPort — now get tabs like everything else

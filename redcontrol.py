@@ -19892,7 +19892,7 @@ class RedControl:
 
         _make_section_btn("DITH", "Dithering", icon="≋")
         _make_section_btn("COLOR", "Color / Depth", icon="◧")
-        _make_section_btn("SIGNAL", "DisplayPort Signal", icon="⇄")
+        _make_section_btn("SIGNAL", "Signal (DP / HDMI)", icon="⇄")
         _make_section_btn("PROPS", "Display Properties", icon="⚙")
 
         tk.Frame(self.sidebar, bg=t["bg_sidebar"], height=14).pack(fill="x")
@@ -25868,12 +25868,13 @@ sudo -n umr --version
             label = self.current_tearfree_labels[idx]
             label.config(text=f"Current: {current_tf if current_tf else 'Unknown'}")
 
-    # ========== DisplayPort Signal (UMR stream encoder) ==========
+    # ========== Signal (UMR stream encoder — DisplayPort & HDMI) ==========
     #
     # The FMT block dithers/truncates per display pipe regardless of connector
-    # type. These controls go one step further down the pipeline: the DP
-    # stream encoder (mmDPx_*) that packs pixels onto the DisplayPort link.
-    # DP_COMPONENT_DEPTH is what the sink actually receives per channel.
+    # type. This section goes one step further down the pipeline: the DIG
+    # (Digital Interface) encoder that packs pixels onto the wire. Each DIGn
+    # contains a DP stream encoder (mmDPn_*) and an HDMI/TMDS encoder
+    # (mmDIGn_HDMI_*); only one is active depending on the connector.
 
     DP_DEPTH_MAP = {0: "6 bpc", 1: "8 bpc", 2: "10 bpc", 3: "12 bpc", 4: "16 bpc"}
     DP_ENCODING_MAP = {
@@ -25884,13 +25885,9 @@ sudo -n umr --version
         4: "Y-only",
         5: "YCbCr 4:2:0",
     }
-    DP_MAX_ENCODERS = 6  # DP0..DP5 stream encoders probed via UMR
-
-    def is_dp_connector(self, connector_name):
-        """True for DisplayPort/eDP connectors (X11 or DRM naming)."""
-        if not connector_name:
-            return False
-        return connector_name.startswith(("DisplayPort", "DP-", "eDP"))
+    HDMI_DEPTH_MAP = {0: "8 bpc", 1: "10 bpc", 2: "12 bpc", 3: "16 bpc"}
+    TMDS_FORMAT_MAP = {0: "RGB 4:4:4", 1: "YCbCr 4:2:2", 2: "YCbCr 4:4:4"}
+    SIG_MAX_ENCODERS = 6  # DIG0..DIG5 probed via UMR
 
     def read_umr_bitfields(self, reg_name, fields):
         """Read a register with `umr -O bits` and return {field: int} for the
@@ -25901,7 +25898,7 @@ sudo -n umr --version
             return None
         result = {}
         for field in fields:
-            m = re.search(rf"{re.escape(field)}\b.*?==\s*(0x[0-9a-fA-F]+|\d+)", output)
+            m = re.search(rf"\.{re.escape(field)}\[.*?==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m:
                 try:
                     result[field] = int(m.group(1), 0)
@@ -25909,56 +25906,67 @@ sudo -n umr --version
                     pass
         return result if result else None
 
-    def detect_dp_encoders(self):
-        """Probe DP stream encoders via UMR.
+    def detect_signal_encoders(self):
+        """Probe DIG encoders via UMR and classify each active one as DP or HDMI.
 
-        Returns a list of dicts for encoders with an enabled video stream:
-        {enc, source (OTG/CRTC feeding the DIG frontend, if readable),
-         encoding, depth, encoding_raw, depth_raw}
+        A DIG frontend is considered active when its symbol clock is running
+        (DIG_SYMCLK_FE_ON). Mode is DP when the embedded DP stream encoder has
+        an enabled video stream, otherwise HDMI/TMDS.
+
+        Returns a list of dicts:
+        {enc, mode ('DP'|'HDMI'), source (CRTC feeding the DIG),
+         encoding, depth, depth_raw}
         """
         found = []
-        for n in range(self.DP_MAX_ENCODERS):
-            vid = self.read_umr_bitfields(f"mmDP{n}_DP_VID_STREAM_CNTL",
-                                          ["DP_VID_STREAM_ENABLE"])
-            if not vid or vid.get("DP_VID_STREAM_ENABLE") != 1:
+        for n in range(self.SIG_MAX_ENCODERS):
+            fe = self.read_umr_bitfields(
+                f"mmDIG{n}_DIG_FE_CNTL",
+                ["DIG_SOURCE_SELECT", "DIG_SYMCLK_FE_ON", "TMDS_COLOR_FORMAT"])
+            if not fe or fe.get("DIG_SYMCLK_FE_ON") != 1:
                 continue
 
-            pf = self.read_umr_bitfields(f"mmDP{n}_DP_PIXEL_FORMAT",
-                                         ["DP_PIXEL_ENCODING", "DP_COMPONENT_DEPTH"]) or {}
-            src = self.read_umr_bitfields(f"mmDIG{n}_DIG_FE_CNTL",
-                                          ["DIG_SOURCE_SELECT"]) or {}
-
-            enc_raw = pf.get("DP_PIXEL_ENCODING")
-            depth_raw = pf.get("DP_COMPONENT_DEPTH")
-            found.append({
-                'enc': n,
-                'source': src.get("DIG_SOURCE_SELECT"),
-                'encoding_raw': enc_raw,
-                'depth_raw': depth_raw,
-                'encoding': self.DP_ENCODING_MAP.get(enc_raw, f"Unknown ({enc_raw})"),
-                'depth': self.DP_DEPTH_MAP.get(depth_raw, f"Unknown ({depth_raw})"),
-            })
-            console_print(f"DEBUG: DP{n} stream active, source OTG={src.get('DIG_SOURCE_SELECT')}, "
-                          f"encoding={enc_raw}, depth={depth_raw}")
+            dp = self.read_umr_bitfields(f"mmDP{n}_DP_VID_STREAM_CNTL",
+                                         ["DP_VID_STREAM_ENABLE"]) or {}
+            if dp.get("DP_VID_STREAM_ENABLE") == 1:
+                pf = self.read_umr_bitfields(
+                    f"mmDP{n}_DP_PIXEL_FORMAT",
+                    ["DP_PIXEL_ENCODING", "DP_COMPONENT_DEPTH"]) or {}
+                enc_raw = pf.get("DP_PIXEL_ENCODING")
+                depth_raw = pf.get("DP_COMPONENT_DEPTH")
+                found.append({
+                    'enc': n,
+                    'mode': 'DP',
+                    'source': fe.get("DIG_SOURCE_SELECT"),
+                    'encoding': self.DP_ENCODING_MAP.get(enc_raw, f"Unknown ({enc_raw})"),
+                    'depth': self.DP_DEPTH_MAP.get(depth_raw, f"Unknown ({depth_raw})"),
+                    'depth_raw': depth_raw,
+                })
+            else:
+                hc = self.read_umr_bitfields(
+                    f"mmDIG{n}_HDMI_CONTROL",
+                    ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH"]) or {}
+                deep_en = hc.get("HDMI_DEEP_COLOR_ENABLE")
+                depth_raw = hc.get("HDMI_DEEP_COLOR_DEPTH")
+                if deep_en == 0:
+                    depth = "8 bpc (deep color off)"
+                else:
+                    depth = self.HDMI_DEPTH_MAP.get(depth_raw, f"Unknown ({depth_raw})")
+                tmds_raw = fe.get("TMDS_COLOR_FORMAT")
+                found.append({
+                    'enc': n,
+                    'mode': 'HDMI',
+                    'source': fe.get("DIG_SOURCE_SELECT"),
+                    'encoding': self.TMDS_FORMAT_MAP.get(tmds_raw, f"Unknown ({tmds_raw})"),
+                    'depth': depth,
+                    'depth_raw': depth_raw if deep_en else 0,
+                })
+            console_print(f"DEBUG: DIG{n} active ({found[-1]['mode']}), "
+                          f"source CRTC={found[-1]['source']}, "
+                          f"encoding={found[-1]['encoding']}, depth={found[-1]['depth']}")
         return found
 
-    def dp_encoder_for_output(self, fmt_idx):
-        """Match a display pipe (CRTC/FMT index) to its DP stream encoder.
-
-        Preferred match: DIG frontend whose DIG_SOURCE_SELECT equals the pipe's
-        CRTC. Fallback: the only active DP stream, if there is exactly one.
-        Returns (encoder_number_or_None, list_of_active_encoders).
-        """
-        active = self.detect_dp_encoders()
-        for e in active:
-            if e.get('source') == fmt_idx:
-                return e['enc'], active
-        if len(active) == 1:
-            return active[0]['enc'], active
-        return None, active
-
     def create_signal_tab(self, parent, idx, connector_name):
-        """DisplayPort Signal panel — live stream-encoder state via UMR."""
+        """Signal panel — live DIG encoder state (DP & HDMI) via UMR."""
         frame = tk.Frame(parent, bg=self.bg)
         if hasattr(parent, "add"):
             parent.add(frame, text="Signal")
@@ -25972,23 +25980,6 @@ sudo -n umr --version
 
         content = tk.Frame(frame, bg=self.theme.get('bg_content', self.bg))
         content.pack(fill=tk.BOTH, expand=True)
-
-        # Non-DP outputs get a friendly explainer instead of dead controls
-        if not self.is_dp_connector(connector_name):
-            box = tk.Frame(content, bg=bg_card)
-            box.pack(expand=True)
-            tk.Label(box, text="⇄", font=('SF Pro Display', 28),
-                     fg=fg_muted, bg=bg_card).pack(pady=(30, 6))
-            tk.Label(box, text="Not a DisplayPort output",
-                     font=('SF Pro Text', 13, 'bold'),
-                     fg=self.fg, bg=bg_card).pack()
-            tk.Label(box,
-                     text=f"{connector_name or 'This output'} is not DisplayPort/eDP.\n"
-                          "DisplayPort signal controls only apply to DP outputs.\n"
-                          "Dithering and Color / Depth work on every output type.",
-                     font=('SF Pro Text', 11), fg=fg_muted, bg=bg_card,
-                     justify=tk.CENTER).pack(pady=(4, 30))
-            return
 
         grid = tk.Frame(content, bg=self.theme.get('bg_content', self.bg))
         grid.pack(fill=tk.BOTH, expand=True)
@@ -26006,14 +25997,17 @@ sudo -n umr --version
                  font=('SF Pro Text', 12, 'bold'),
                  fg=self.fg, bg=bg_card).pack(side='left')
         sig_info = (
-            "Read directly from the GPU's DisplayPort stream encoder registers via UMR.\n\n"
-            "Encoder: which DPx stream encoder drives this output. Auto-detected by matching "
-            "the DIG frontend's source CRTC to this display pipe; pick manually if detection "
+            "Read directly from the GPU's DIG encoder registers via UMR.\n\n"
+            "Encoder: which DIGn block drives this output, and whether its DisplayPort "
+            "stream encoder or HDMI/TMDS encoder is active. Auto-detected by matching the "
+            "DIG frontend's source CRTC to this display pipe; pick manually if detection "
             "is ambiguous on multi-monitor setups.\n\n"
             "Pixel Encoding: how pixels are packed on the link (RGB or YCbCr subsampling).\n"
-            "Component Depth: bits per color channel actually sent to the monitor."
+            "Depth: bits per color channel actually sent to the monitor — DisplayPort "
+            "signals it in DP_COMPONENT_DEPTH; HDMI uses the deep-color fields "
+            "(deep color off = standard 8 bpc)."
         )
-        self.create_info_icon(header, title="DisplayPort Signal", body=sig_info,
+        self.create_info_icon(header, title="Signal", body=sig_info,
                               bg=bg_card).pack(side='left', padx=(6, 0))
 
         enc_row = tk.Frame(status_card, bg=bg_card)
@@ -26022,17 +26016,22 @@ sudo -n umr --version
                  font=('SF Pro Text', 12), fg=self.fg, bg=bg_card).pack(side='left')
         encoder_var = tk.StringVar(value="Detecting…")
         encoder_box = ttk.Combobox(enc_row, textvariable=encoder_var,
-                                   values=[], state='disabled', width=8,
+                                   values=[], state='disabled', width=14,
                                    font=('SF Pro Text', 10),
                                    style='Modern.TCombobox')
         encoder_box.pack(side='left', padx=(12, 0))
 
+        mode_label = tk.Label(status_card, text="Link Type:  —",
+                              font=('SF Pro Text', 11),
+                              fg=self.fg, bg=bg_card)
+        mode_label.pack(anchor='w', pady=(4, 2))
+
         encoding_label = tk.Label(status_card, text="Pixel Encoding:  —",
                                   font=('SF Pro Text', 11),
                                   fg=self.fg, bg=bg_card)
-        encoding_label.pack(anchor='w', pady=(4, 2))
+        encoding_label.pack(anchor='w', pady=(2, 2))
 
-        depth_label = tk.Label(status_card, text="Component Depth:  —",
+        depth_label = tk.Label(status_card, text="Depth on Link:  —",
                                font=('SF Pro Text', 11, 'bold'),
                                fg=self.fg, bg=bg_card)
         depth_label.pack(anchor='w', pady=(2, 2))
@@ -26043,7 +26042,7 @@ sudo -n umr --version
         link_label.pack(anchor='w', pady=(2, 10))
 
         refresh_btn = tk.Button(status_card, text="⟳  Refresh",
-                                command=lambda: self.refresh_dp_signal(idx, connector_name),
+                                command=lambda: self.refresh_signal_panel(idx, connector_name),
                                 font=('SF Pro Text', 10),
                                 bg=bg_card, fg=self.fg,
                                 activebackground=self.theme.get('bg_panel', bg_card),
@@ -26053,27 +26052,34 @@ sudo -n umr --version
                                 highlightbackground=self.theme.get('border', '#E5E5EA'))
         refresh_btn.pack(anchor='w')
 
-        # === Force Component Depth card (right) ===
+        # === Force Depth card (right) ===
         force_card = tk.Frame(grid, bg=bg_card)
         force_card.grid(row=0, column=1, sticky='nsew', padx=(6, 12), pady=6)
 
         f_header = tk.Frame(force_card, bg=bg_card)
         f_header.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(f_header, text="Force Component Depth",
+        tk.Label(f_header, text="Force Link Depth",
                  font=('SF Pro Text', 12, 'bold'),
                  fg=self.fg, bg=bg_card).pack(side='left')
         force_info = (
-            "Writes DP_COMPONENT_DEPTH on the stream encoder via UMR — the DP link "
-            "immediately carries the new per-channel depth without a modeset.\n\n"
-            "Pairs with the Dithering / Truncation controls: e.g. force 8 bpc here and "
-            "disable dithering in the Dithering section for a completely static signal, "
-            "or force 6 bpc with spatial dithering for flicker-sensitive setups.\n\n"
-            "Notes:\n"
-            "• The driver reprograms this on any modeset (resolution/refresh change, "
-            "monitor sleep) — reapply afterwards.\n"
-            "• Some monitors briefly blank or show artifacts if the forced depth "
-            "exceeds what the link was trained for. Reverting to the previous value "
-            "restores the picture."
+            "Writes the encoder's depth field directly via UMR — no modeset, and it "
+            "works on Wayland too.\n\n"
+            "DisplayPort: sets DP_COMPONENT_DEPTH on the stream encoder. Low risk — "
+            "applied instantly on the live link.\n\n"
+            "HDMI: sets HDMI_DEEP_COLOR_DEPTH / HDMI_DEEP_COLOR_ENABLE. Higher risk — "
+            "deep color changes the TMDS clock ratio, which normally requires link "
+            "retraining, so the picture may break until reverted. A confirmation "
+            "dialog auto-reverts after 15 seconds unless you keep the change.\n\n"
+            "This is different from Max BPC in Color / Depth: Max BPC is a driver "
+            "policy cap that takes effect at the next modeset; this changes what the "
+            "encoder is packing on the wire right now.\n\n"
+            "Why no 6 bpc on HDMI: DisplayPort defines an 18-bit (6 bpc) link format, "
+            "but HDMI's minimum wire format is 24-bit RGB — the hardware field only "
+            "encodes 8/10/12/16 bpc. For 6-bit output on an HDMI/TMDS link, use "
+            "Truncate → 6-bit (or 6-bit spatial dithering) in the Dithering section; "
+            "the wire stays 8 bpc but only 6 bits carry content.\n\n"
+            "The driver reprograms these registers on any modeset (resolution/refresh "
+            "change, monitor sleep) — reapply afterwards."
         )
         self.create_info_icon(f_header, title="Force Depth", body=force_info,
                               bg=bg_card).pack(side='left', padx=(6, 0))
@@ -26083,28 +26089,32 @@ sudo -n umr --version
 
         force_depth_var = tk.StringVar(value="8 bpc")
         force_box = ttk.Combobox(force_card, textvariable=force_depth_var,
-                                 values=list(self.DP_DEPTH_MAP.values()),
-                                 state='readonly', width=12,
+                                 values=[], state='disabled', width=12,
                                  font=('SF Pro Text', 13),
                                  style='Modern.TCombobox')
         force_box.pack(anchor='w', pady=(0, 8))
         force_box.bind('<<ComboboxSelected>>',
-                       lambda e: self.set_dp_component_depth(idx, connector_name))
+                       lambda e: self.force_signal_depth(idx, connector_name))
 
-        tk.Label(force_card,
-                 text="Applied instantly on the live DP link.\n"
-                      "Reapply after any resolution or refresh change.",
-                 font=('SF Pro Text', 9), fg=fg_muted, bg=bg_card,
-                 justify=tk.LEFT).pack(anchor='w')
+        force_note = tk.Label(force_card,
+                              text="Applied instantly on the live link.\n"
+                                   "Reapply after any resolution or refresh change.",
+                              font=('SF Pro Text', 9), fg=fg_muted, bg=bg_card,
+                              justify=tk.LEFT)
+        force_note.pack(anchor='w')
 
         self.dp_widgets[idx] = {
             'encoder_var': encoder_var,
             'encoder_box': encoder_box,
+            'mode_label': mode_label,
             'encoding_label': encoding_label,
             'depth_label': depth_label,
             'link_label': link_label,
             'force_depth_var': force_depth_var,
+            'force_box': force_box,
+            'force_note': force_note,
             'active_encoder': None,
+            'active_mode': None,
             'current_depth': None,
         }
 
@@ -26112,23 +26122,22 @@ sudo -n umr --version
             w = self.dp_widgets.get(idx)
             if not w:
                 return
-            sel = w['encoder_var'].get()
-            m = re.match(r"DP(\d+)", sel)
+            m = re.match(r"DIG(\d+)", w['encoder_var'].get())
             if m:
                 w['active_encoder'] = int(m.group(1))
-                self.refresh_dp_signal(idx, connector_name, redetect=False)
+                self.refresh_signal_panel(idx, connector_name, redetect=False)
         encoder_box.bind('<<ComboboxSelected>>', on_encoder_selected)
 
         # Populate after the UI settles so tab creation stays snappy
-        self.root.after(250, lambda: self.refresh_dp_signal(idx, connector_name))
+        self.root.after(250, lambda: self.refresh_signal_panel(idx, connector_name))
 
-    def refresh_dp_signal(self, idx, connector_name, redetect=True):
-        """Refresh the DisplayPort Signal panel from hardware."""
+    def refresh_signal_panel(self, idx, connector_name, redetect=True):
+        """Refresh the Signal panel from hardware."""
         w = self.dp_widgets.get(idx)
         if not w:
             return
 
-        active = self.detect_dp_encoders()
+        active = self.detect_signal_encoders()
         by_enc = {e['enc']: e for e in active}
 
         if redetect or w.get('active_encoder') not in by_enc:
@@ -26141,30 +26150,53 @@ sudo -n umr --version
                 best = active[0]['enc']
             w['active_encoder'] = best
 
-        values = [f"DP{e['enc']}" for e in active]
+        values = [f"DIG{e['enc']} · {e['mode']}" for e in active]
         w['encoder_box'].configure(values=values,
                                    state='readonly' if len(values) > 1 else 'disabled')
 
         enc = w.get('active_encoder')
         if enc is None or enc not in by_enc:
-            w['encoder_var'].set("None" if not values else values[0])
-            w['encoding_label'].config(text="Pixel Encoding:  no active DP stream found")
-            w['depth_label'].config(text="Component Depth:  —")
+            w['encoder_var'].set("None found")
+            w['mode_label'].config(text="Link Type:  —")
+            w['encoding_label'].config(text="Pixel Encoding:  no active encoder found")
+            w['depth_label'].config(text="Depth on Link:  —")
             w['link_label'].config(text="Link Status:  —")
+            w['force_box'].configure(state='disabled')
             if not values:
-                self.show_status("No active DisplayPort stream encoder detected", "warn")
+                self.show_status("No active display encoder detected — is this GPU driving the monitor?", "warn")
             return
 
         info = by_enc[enc]
+        w['active_mode'] = info['mode']
         suffix = "" if info.get('source') is None else f"  (CRTC {info['source']})"
-        w['encoder_var'].set(f"DP{enc}")
-        w['encoding_label'].config(text=f"Pixel Encoding:  {info['encoding']}{suffix}")
-        w['depth_label'].config(text=f"Component Depth:  {info['depth']}")
+        w['encoder_var'].set(f"DIG{enc} · {info['mode']}")
+        if info['mode'] == 'DP':
+            link_type = "DisplayPort"
+        elif connector_name and connector_name.startswith(('DisplayPort', 'DP-')):
+            # DP++ dual-mode: the DP port is outputting TMDS through a
+            # passive DP→HDMI adapter/cable, so the link really is HDMI.
+            link_type = "HDMI / TMDS (DP++ — adapter converts to HDMI)"
+        else:
+            link_type = "HDMI / TMDS"
+        w['mode_label'].config(text=f"Link Type:  {link_type}{suffix}")
+        w['encoding_label'].config(text=f"Pixel Encoding:  {info['encoding']}")
+        w['depth_label'].config(text=f"Depth on Link:  {info['depth']}")
         w['current_depth'] = info['depth']
 
-        # Keep the force dropdown in sync with reality when it reads cleanly
-        if info['depth'] in self.DP_DEPTH_MAP.values():
+        # Adapt the force dropdown to the encoder type
+        if info['mode'] == 'DP':
+            depth_values = list(self.DP_DEPTH_MAP.values())
+            w['force_note'].config(text="Applied instantly on the live DP link.\n"
+                                        "Reapply after any resolution or refresh change.")
+        else:
+            depth_values = list(self.HDMI_DEPTH_MAP.values())
+            w['force_note'].config(text="HDMI deep color changes need TMDS retraining —\n"
+                                        "auto-reverts in 15 s unless you confirm.")
+        w['force_box'].configure(values=depth_values, state='readonly')
+        if info['depth'] in depth_values:
             w['force_depth_var'].set(info['depth'])
+        elif info['mode'] == 'HDMI' and info['depth'].startswith("8 bpc"):
+            w['force_depth_var'].set("8 bpc")
 
         if not self.is_wayland:
             link = self.get_current_link_status(connector_name)
@@ -26172,43 +26204,88 @@ sudo -n umr --version
         else:
             w['link_label'].config(text="Link Status:  unavailable on Wayland")
 
-    def set_dp_component_depth(self, idx, connector_name):
-        """Force DP_COMPONENT_DEPTH on this output's stream encoder."""
+    def force_signal_depth(self, idx, connector_name):
+        """Force the on-link color depth on this output's encoder (DP or HDMI)."""
         w = self.dp_widgets.get(idx)
         if not w:
             return
         enc = w.get('active_encoder')
-        if enc is None:
-            self.show_status("No active DP encoder detected — click Refresh first", "error")
+        mode = w.get('active_mode')
+        if enc is None or mode is None:
+            self.show_status("No active encoder detected — click Refresh first", "error")
             return
 
         label = w['force_depth_var'].get()
-        depth_reverse = {v: k for k, v in self.DP_DEPTH_MAP.items()}
-        val = depth_reverse.get(label)
+        before = w.get('current_depth') or 'Unknown'
+
+        if mode == 'DP':
+            val = {v: k for k, v in self.DP_DEPTH_MAP.items()}.get(label)
+            if val is None:
+                return
+            path = f"{self.asic_name}.{self.block_name}.mmDP{enc}_DP_PIXEL_FORMAT"
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{path}.DP_COMPONENT_DEPTH", str(val)])
+            command = f"umr -wb {path}.DP_COMPONENT_DEPTH {val}"
+
+            pf = self.read_umr_bitfields(f"mmDP{enc}_DP_PIXEL_FORMAT",
+                                         ["DP_COMPONENT_DEPTH"]) or {}
+            after_raw = pf.get("DP_COMPONENT_DEPTH")
+            after = self.DP_DEPTH_MAP.get(after_raw, f"Unknown ({after_raw})")
+            success = (after_raw == val)
+            self.log_command(f"{connector_name}: DP Component Depth",
+                             before, command, after, success=success)
+            if success:
+                self.show_status(f"DIG{enc} DP component depth → {after}", "info")
+            else:
+                self.show_status(f"DIG{enc} depth write not accepted (still {after})", "error")
+            self.refresh_signal_panel(idx, connector_name, redetect=False)
+            return
+
+        # HDMI: deep-color change — riskier, use confirm-or-auto-revert
+        val = {v: k for k, v in self.HDMI_DEPTH_MAP.items()}.get(label)
         if val is None:
             return
 
-        before = w.get('current_depth') or 'Unknown'
-        path = f"{self.asic_name}.{self.block_name}.mmDP{enc}_DP_PIXEL_FORMAT"
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                              f"{path}.DP_COMPONENT_DEPTH", str(val)])
-        command = f"umr -wb {path}.DP_COMPONENT_DEPTH {val}"
+        hc = self.read_umr_bitfields(f"mmDIG{enc}_HDMI_CONTROL",
+                                     ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH"]) or {}
+        old_en = hc.get("HDMI_DEEP_COLOR_ENABLE", 0)
+        old_depth = hc.get("HDMI_DEEP_COLOR_DEPTH", 0)
 
-        # Read back so the log reflects what the hardware accepted
-        pf = self.read_umr_bitfields(f"mmDP{enc}_DP_PIXEL_FORMAT",
-                                     ["DP_COMPONENT_DEPTH"]) or {}
-        after_raw = pf.get("DP_COMPONENT_DEPTH")
-        after = self.DP_DEPTH_MAP.get(after_raw, f"Unknown ({after_raw})")
-        success = (after_raw == val)
+        path = f"{self.asic_name}.{self.block_name}.mmDIG{enc}_HDMI_CONTROL"
+        new_en = 0 if val == 0 else 1
 
-        self.log_command(f"{connector_name}: DP Component Depth",
-                         before, command, after, success=success)
-        if success:
-            self.show_status(f"DP{enc} component depth → {after}", "info")
+        def write_pair(en, depth):
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{path}.HDMI_DEEP_COLOR_DEPTH", str(depth)])
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{path}.HDMI_DEEP_COLOR_ENABLE", str(en)])
+
+        write_pair(new_en, val)
+        command = (f"umr -wb {path}.HDMI_DEEP_COLOR_DEPTH {val}; "
+                   f"umr -wb {path}.HDMI_DEEP_COLOR_ENABLE {new_en}")
+
+        def revert():
+            write_pair(old_en, old_depth)
+            self.refresh_signal_panel(idx, connector_name, redetect=False)
+
+        # No-op change (e.g. 8 bpc while deep color already off): just log
+        if new_en == old_en and (new_en == 0 or val == old_depth):
+            self.log_command(f"{connector_name}: HDMI Deep Color",
+                             before, command, label, success=True)
+            self.refresh_signal_panel(idx, connector_name, redetect=False)
+            return
+
+        kept = self.show_display_change_confirmation(
+            "HDMI Deep Color", before, label, revert)
+        if kept:
+            self.log_command(f"{connector_name}: HDMI Deep Color",
+                             before, command, label, success=True)
+            self.show_status(f"DIG{enc} HDMI deep color → {label}", "info")
         else:
-            self.show_status(f"DP{enc} depth write not accepted (still {after})", "error")
-
-        self.refresh_dp_signal(idx, connector_name, redetect=False)
+            self.log_command(f"{connector_name}: HDMI Deep Color",
+                             label, f"Reverted to {before}", before, success=True)
+            self.show_status("HDMI deep color reverted", "info")
+        self.refresh_signal_panel(idx, connector_name, redetect=False)
 
     def apply_max_bpc(self, idx, connector_name):
         """Apply max BPC setting"""
