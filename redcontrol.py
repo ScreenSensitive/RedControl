@@ -24667,7 +24667,7 @@ sudo -n umr --version
             # Thin separator line (only if we showed something)
             if title or warning:
                 separator = tk.Frame(header_container, bg=t["border"], height=1)
-                separator.pack(fill="x", padx=40, pady=(0, 24))
+                separator.pack(fill="x", padx=40, pady=(0, 12))
 
         def _card_surface(parent):
             t = self.theme
@@ -24685,7 +24685,7 @@ sudo -n umr --version
 
             # Inner padding - VERY generous
             inner = tk.Frame(card, bg=t["bg_card"])
-            inner.pack(fill=tk.BOTH, expand=True, padx=32, pady=32)
+            inner.pack(fill=tk.BOTH, expand=True, padx=32, pady=(16, 28))
             return inner
 
         def _build_in_card(page, title, subtitle, build_fn, warning=""):
@@ -26897,7 +26897,7 @@ sudo -n umr --version
                          "running", success=True)
 
         samples = []
-        w['crc_label'].config(text="Testing…  keep the screen completely still")
+        w['crc_label'].config(text="Testing…  keep the screen completely still", fg=self.fg)
 
         def _sample(n=0):
             rg = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_CRC0_DATA_RG",
@@ -26921,17 +26921,19 @@ sudo -n umr --version
                 self.run_umr_command(["-i", str(self.gpu_instance), "-wb", reg_field, val])
             valid = [s for s in samples if any(v for v in s if v)]
             if not valid:
-                w['crc_label'].config(text="Result:  no CRC data captured — try again")
+                w['crc_label'].config(text="Result:  no CRC data captured — try again", fg=self.fg)
                 return
             uniq = len(set(valid))
             if uniq == 1:
                 w['crc_label'].config(
-                    text=f"Result:  STATIC ✓  ({len(valid)} samples, every frame identical)")
+                    text=f"Result:  STATIC ✓  ({len(valid)} samples, every frame identical)",
+                    fg="#3fb950")
                 self.show_status("Static signal confirmed — no temporal modulation", "info")
             else:
                 w['crc_label'].config(
                     text=f"Result:  CHANGING  ({uniq} distinct frames in {len(valid)} samples)\n"
-                         "Temporal dithering, DRR, or on-screen content is modulating frames.")
+                         "Temporal dithering, DRR, or on-screen content is modulating frames.",
+                    fg="#d29922")
                 self.show_status("Signal is changing frame-to-frame", "warn")
 
         # give the CRC engine a frame or two to start producing data
