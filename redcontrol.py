@@ -22379,6 +22379,42 @@ class RedControl:
                     pass
         self.show_active_section()
 
+    def _scrollable(self, parent):
+        """Wrap parent in a vertical scroll area; return the inner frame to build into.
+        The scrollbar appears only when content is taller than the viewport."""
+        t = self.theme
+        bgc = t.get("bg_content", self.bg)
+        canvas = tk.Canvas(parent, bg=bgc, highlightthickness=0, bd=0)
+        vsb = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=bgc)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync(_=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                need = inner.winfo_reqheight() > canvas.winfo_height()
+                if need and not vsb.winfo_ismapped():
+                    vsb.pack(side="right", fill="y")
+                elif not need and vsb.winfo_ismapped():
+                    vsb.pack_forget()
+            except Exception:
+                pass
+        inner.bind("<Configure>", _sync)
+        canvas.bind("<Configure>", lambda e: (canvas.itemconfigure(win, width=e.width), _sync()))
+
+        def _wheel(e):
+            step = -1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1
+            canvas.yview_scroll(step, "units")
+        canvas.bind("<Enter>", lambda _e: (canvas.bind_all("<MouseWheel>", _wheel),
+                                           canvas.bind_all("<Button-4>", _wheel),
+                                           canvas.bind_all("<Button-5>", _wheel)))
+        canvas.bind("<Leave>", lambda _e: (canvas.unbind_all("<MouseWheel>"),
+                                           canvas.unbind_all("<Button-4>"),
+                                           canvas.unbind_all("<Button-5>")))
+        return inner
+
     def show_active_section(self):
         """Show the active section page for the currently selected monitor tab."""
         if not hasattr(self, "monitor_section_frames"):
@@ -24548,6 +24584,12 @@ sudo -n umr --version
             "PROPS": page_props,
         })
 
+        # make each section page scroll when its content is taller than the window
+        dith_body = self._scrollable(page_dith)
+        color_body = self._scrollable(page_color)
+        signal_body = self._scrollable(page_signal)
+        props_body = self._scrollable(page_props)
+
         def _page_header(parent, title, subtitle="", warning=""):
             # Skip header entirely if no title AND no warning
             if not title and not warning:
@@ -24630,26 +24672,26 @@ sudo -n umr --version
                 self.bg = _orig_bg
 
         _build_in_card(
-            page_dith,
+            dith_body,
             "",
             "",
             lambda parent: self.create_dithering_tab(parent, idx, name),
             warning="Enabling these options may cause significant pixel flicker"
         )
         _build_in_card(
-            page_color,
+            color_body,
             "",
             "",
             lambda parent: self.create_color_depth_tab(parent, idx, connector_name, name, resolution)
         )
         _build_in_card(
-            page_signal,
+            signal_body,
             "",
             "",
             lambda parent: self.create_signal_tab(parent, idx, connector_name)
         )
         _build_in_card(
-            page_props,
+            props_body,
             "",
             "",
             lambda parent: self.create_display_properties_tab(parent, idx, connector_name)
