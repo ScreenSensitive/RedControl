@@ -19391,6 +19391,33 @@ class RedControl:
 
         self.create_ui()
         self.auto_detect_gpu()
+        # one-time safety disclaimer on first run
+        try:
+            self.root.after(600, self.maybe_show_first_run)
+        except Exception:
+            pass
+
+    def maybe_show_first_run(self):
+        """Show a one-time 'use at your own risk' notice on first launch."""
+        try:
+            flag = self.settings_dir / "first_run_ack"
+            if flag.exists():
+                return
+            messagebox.showwarning(
+                "RedControl \u2014 please read first",
+                "RedControl changes low-level AMD display registers directly (via umr).\n\n"
+                "\u2022 Normally safe, but on rare hardware a bad setting can briefly glitch "
+                "or blank the screen.\n"
+                "\u2022 Risky changes (resolution / refresh) auto-revert after 15 seconds if "
+                "the screen goes blank \u2014 just wait it out.\n"
+                "\u2022 Every change is shown as the exact umr command in the Command Log, "
+                "so nothing is hidden.\n\n"
+                "Use at your own risk. Continuing means you're deliberately adjusting your "
+                "GPU's display engine.",
+                parent=self.root)
+            flag.write_text("ack\n")
+        except Exception:
+            pass
 
     def create_tray_icon_image(self):
         """Return the embedded tray icon image (PIL Image, RGBA)."""
@@ -21389,7 +21416,7 @@ class RedControl:
                     found_connector = True
                     # Look at the next ~60 lines for max bpc property
                     # (EDID data can be very long, so we need to search further)
-                    for j in range(i+1, min(i+60, len(lines))):
+                    for j in range(i+1, min(i+400, len(lines))):
                         prop_line = lines[j]
                         # Properties are indented with tabs/spaces
                         # Stop when we hit another connector (non-indented line starting with a letter)
@@ -21747,7 +21774,7 @@ class RedControl:
                 if line.startswith(connector_name + ' '):
                     found_connector = True
                     # Look at the next ~60 lines for Broadcast RGB property
-                    for j in range(i+1, min(i+60, len(lines))):
+                    for j in range(i+1, min(i+400, len(lines))):
                         prop_line = lines[j]
                         # Stop when we hit another connector
                         if prop_line and not prop_line[0].isspace() and prop_line[0].isalpha():
@@ -21783,7 +21810,7 @@ class RedControl:
                 # Check if this is our connector line
                 if line.startswith(connector_name + ' '):
                     # Look at the next ~60 lines for TearFree property
-                    for j in range(i+1, min(i+60, len(lines))):
+                    for j in range(i+1, min(i+400, len(lines))):
                         prop_line = lines[j]
                         # Stop when we hit another connector
                         if prop_line and not prop_line[0].isspace() and prop_line[0].isalpha():
@@ -21819,7 +21846,7 @@ class RedControl:
                 # Check if this is our connector line
                 if line.startswith(connector_name + ' '):
                     # Look at the next ~60 lines for link-status property
-                    for j in range(i+1, min(i+60, len(lines))):
+                    for j in range(i+1, min(i+400, len(lines))):
                         prop_line = lines[j]
                         # Stop when we hit another connector
                         if prop_line and not prop_line[0].isspace() and prop_line[0].isalpha():
@@ -25776,7 +25803,7 @@ sudo -n umr --version
                     lines = check_result.stdout.split('\n')
                     for i, line in enumerate(lines):
                         if line.startswith(connector_name + ' '):
-                            for j in range(i+1, min(i+60, len(lines))):
+                            for j in range(i+1, min(i+400, len(lines))):
                                 prop_line = lines[j]
                                 if prop_line and not prop_line[0].isspace() and prop_line[0].isalpha():
                                     break
