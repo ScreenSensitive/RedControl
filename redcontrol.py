@@ -19928,7 +19928,7 @@ class RedControl:
         _make_section_btn("DITH", "Dithering", icon="≋")
         _make_section_btn("COLOR", "Color / Depth", icon="◧")
         _make_section_btn("SIGNAL", "Signal (DP / HDMI)", icon="⇄")
-        _make_section_btn("PROPS", "Display Properties", icon="⚙")
+        _make_section_btn("PROPS", "Display", icon="⚙")
 
         tk.Frame(self.sidebar, bg=t["bg_sidebar"], height=14).pack(fill="x")
         
@@ -24704,27 +24704,27 @@ sudo -n umr --version
 
         _build_in_card(
             dith_body,
-            "",
-            "",
+            "Dithering",
+            "Spatial & temporal dithering — the flicker you can't see but your eyes feel",
             lambda parent: self.create_dithering_tab(parent, idx, name),
             warning="Enabling these options may cause significant pixel flicker"
         )
         _build_in_card(
             color_body,
-            "",
-            "",
+            "Color & Depth",
+            "Bit depth, colorspace and RGB range on this output",
             lambda parent: self.create_color_depth_tab(parent, idx, connector_name, name, resolution)
         )
         _build_in_card(
             signal_body,
-            "",
-            "",
+            "Signal",
+            "What your GPU is actually putting on the wire — link, depth & encoding (advanced)",
             lambda parent: self.create_signal_tab(parent, idx, connector_name)
         )
         _build_in_card(
             props_body,
-            "",
-            "",
+            "Display",
+            "Resolution, refresh rate, scaling and TearFree — everyday settings",
             lambda parent: self.create_display_properties_tab(parent, idx, connector_name)
         )
 
