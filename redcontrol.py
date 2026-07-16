@@ -19710,6 +19710,14 @@ class RedControl:
         t.setdefault("bg_panel", t.get("bg_card", t.get("bg_content", "#ffffff")))
         t.setdefault("bg_hover", t.get("bg_panel"))
         t.setdefault("shadow", t.get("border", "#000000"))
+        # semantic banner colors — adapt to dark/light so nothing becomes a light island
+        _dark = self.theme_name == "modern_dark"
+        t.setdefault("warn_bg", "#3a2f12" if _dark else "#FFF3CD")
+        t.setdefault("warn_fg", "#e3b341" if _dark else "#856404")
+        t.setdefault("err_bg", "#3a1a1a" if _dark else "#FFF0F0")
+        t.setdefault("err_fg", "#f7a8a0" if _dark else "#721C24")
+        t.setdefault("info_bg", "#12283f" if _dark else "#E3F2FD")
+        t.setdefault("info_fg", "#79c0ff" if _dark else "#1976D2")
         self.theme = t
         
         # Store themes dict for apply_modern_ttk_styles to use
@@ -20288,11 +20296,11 @@ class RedControl:
         warning.geometry(f"+{x}+{y}")
 
         # Warning icon and title
-        title_frame = tk.Frame(warning, bg="#FFF3CD", relief=tk.RIDGE, bd=2)
+        title_frame = tk.Frame(warning, bg=self.theme["warn_bg"], relief=tk.RIDGE, bd=2)
         title_frame.pack(fill=tk.X, padx=20, pady=20)
 
         tk.Label(title_frame, text="⚠️ Wayland Session Detected",
-                bg="#FFF3CD", fg="#856404",
+                bg=self.theme["warn_bg"], fg=self.theme["warn_fg"],
                 font=("Arial", 14, "bold")).pack(pady=15)
 
         # Message
@@ -22215,7 +22223,7 @@ class RedControl:
         dialog = tk.Toplevel(self.root)
         dialog.title("UMR Not Detected")
         dialog.geometry("1200x1030")  # 20% taller from 858
-        dialog.configure(bg="#FFF3CD")
+        dialog.configure(bg=self.theme["warn_bg"])
         dialog.resizable(True, True)
         dialog.transient(self.root)
 
@@ -22226,13 +22234,13 @@ class RedControl:
         dialog.geometry(f"+{x}+{y}")
 
         # Main container - CENTERED
-        main_container = tk.Frame(dialog, bg="#FFF3CD")
+        main_container = tk.Frame(dialog, bg=self.theme["warn_bg"])
         main_container.place(relx=0.5, rely=0.5, anchor='center')
 
         # Title
         title_label = tk.Label(main_container,
                               text="⚠️  UMR Not Detected",
-                              bg="#FFF3CD", fg="#856404",
+                              bg=self.theme["warn_bg"], fg=self.theme["warn_fg"],
                               font=("Arial", 22, "bold"))
         title_label.pack(pady=(0, 20))
 
@@ -22252,14 +22260,14 @@ class RedControl:
                                "https://gitlab.freedesktop.org/tomstdenis/umr\n\n"
                                "Note: Install UMR from your terminal after downloading.\n"
                                "After installing UMR, restart this tool to enable all features.",
-                          bg="#FFF3CD", fg="#856404",
+                          bg=self.theme["warn_bg"], fg=self.theme["warn_fg"],
                           font=("Arial", 11),
                           justify=tk.CENTER,
                           wraplength=1000)
         message.pack(pady=(0, 25))
 
         # Buttons
-        button_frame = tk.Frame(main_container, bg="#FFF3CD")
+        button_frame = tk.Frame(main_container, bg=self.theme["warn_bg"])
         button_frame.pack(pady=20)
 
         tk.Button(button_frame, text="Open UMR Website",
@@ -22312,14 +22320,14 @@ class RedControl:
         message.pack(pady=(0, 30))
 
         # Info box
-        info_frame = tk.Frame(container, bg="#E3F2FD", relief=tk.RIDGE, bd=2)
+        info_frame = tk.Frame(container, bg=self.theme["info_bg"], relief=tk.RIDGE, bd=2)
         info_frame.pack(padx=40, pady=20)
 
         info = tk.Label(info_frame,
                        text="💡 Tip: If you have an AMD GPU that's not showing up,\n"
                             "make sure your drivers are properly installed.",
                        font=("Arial", 10),
-                       bg="#E3F2FD", fg="#1976D2",
+                       bg=self.theme["info_bg"], fg=self.theme["info_fg"],
                        padx=30, pady=20)
         info.pack()
 
@@ -24543,11 +24551,11 @@ sudo -n umr --version
                 
                 # Warning badge (if provided)
                 if warning:
-                    warning_badge = tk.Frame(title_row, bg="#FFF0F0", relief=tk.FLAT)
+                    warning_badge = tk.Frame(title_row, bg=self.theme["err_bg"], relief=tk.FLAT)
                     warning_badge.pack(side="left", padx=(16, 0) if title else (0, 0))
                     tk.Label(warning_badge,
                             text=f"⚠  {warning}",
-                            bg="#FFF0F0", fg="#721C24",
+                            bg=self.theme["err_bg"], fg=self.theme["err_fg"],
                             font=("SF Pro Text", 11, "bold"),
                             padx=12, pady=6).pack()
             
@@ -25103,15 +25111,15 @@ sudo -n umr --version
 
         # Wayland warning banner
         if self.is_wayland:
-            warning_banner = tk.Frame(frame, bg="#FFF3CD", relief=tk.RIDGE, bd=2)
+            warning_banner = tk.Frame(frame, bg=self.theme["warn_bg"], relief=tk.RIDGE, bd=2)
             warning_banner.pack(fill=tk.X, padx=20, pady=10)
             tk.Label(warning_banner,
                     text="⚠️ Display Properties Unavailable on Wayland",
-                    bg="#FFF3CD", fg="#856404",
+                    bg=self.theme["warn_bg"], fg=self.theme["warn_fg"],
                     font=("SF Pro Text", 12, "bold")).pack(pady=5)
             tk.Label(warning_banner,
                     text="This tab requires xrandr. Switch to an X11 session for full functionality.",
-                    bg="#FFF3CD", fg="#856404",
+                    bg=self.theme["warn_bg"], fg=self.theme["warn_fg"],
                     font=("SF Pro Text", 9),
                     justify=tk.CENTER).pack(pady=(0, 5))
 
