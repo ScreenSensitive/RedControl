@@ -21832,6 +21832,34 @@ class RedControl:
             console_print(f"Error reading TearFree: {e}")
             return None
 
+    def _read_xrandr_prop(self, connector_name, prop):
+        """Read a single xrandr connector property value (or None)."""
+        try:
+            result = subprocess.run(['xrandr', '--props'], capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return None
+            lines = result.stdout.split('\n')
+            for i, line in enumerate(lines):
+                if line.startswith(connector_name + ' '):
+                    for j in range(i + 1, min(i + 400, len(lines))):
+                        pl = lines[j]
+                        if pl and not pl[0].isspace() and pl[0].isalpha():
+                            break
+                        if (prop + ':') in pl:
+                            m = re.search(re.escape(prop) + r':\s*(.+)', pl)
+                            if m:
+                                return m.group(1).strip()
+                    break
+        except Exception:
+            pass
+        return None
+
+    def get_current_scaling_mode(self, connector_name):
+        return self._read_xrandr_prop(connector_name, "scaling mode")
+
+    def get_current_underscan(self, connector_name):
+        return self._read_xrandr_prop(connector_name, "underscan")
+
     def get_current_link_status(self, connector_name):
         """Read current link status from xrandr (Good/Bad)"""
         try:
@@ -22413,6 +22441,9 @@ class RedControl:
         canvas.bind("<Leave>", lambda _e: (canvas.unbind_all("<MouseWheel>"),
                                            canvas.unbind_all("<Button-4>"),
                                            canvas.unbind_all("<Button-5>")))
+        # touch / touchpad drag-to-scroll (press and drag on empty areas)
+        canvas.bind("<ButtonPress-1>", lambda e: canvas.scan_mark(e.x, e.y))
+        canvas.bind("<B1-Motion>", lambda e: canvas.scan_dragto(e.x, e.y, gain=1))
         return inner
 
     def show_active_section(self):
@@ -25347,6 +25378,28 @@ sudo -n umr --version
                 justify=tk.CENTER).pack(anchor='center', pady=(20, 0))
 
         self.current_link_status_labels[idx] = None  # Not updated dynamically
+
+        # === Row 2: GPU / monitor scaling (like NVIDIA's scaling options) ===
+        grid_container.grid_rowconfigure(2, weight=1)
+        current_scaling = self.get_current_scaling_mode(connector_name)
+        create_property_card(
+            grid_container, 2, 0,
+            "GPU Scaling",
+            lambda: current_scaling or "None",
+            lambda val: self.set_xrandr_property(connector_name, "scaling mode", val),
+            ["None", "Full", "Center", "Full aspect"],
+            "How the image fills the panel: None = 1:1, Full = stretch, "
+            "Center = unscaled/centered, Full aspect = keep aspect ratio"
+        )
+        current_underscan = self.get_current_underscan(connector_name)
+        create_property_card(
+            grid_container, 2, 1,
+            "Underscan (overscan fix)",
+            lambda: current_underscan or "off",
+            lambda val: self.set_xrandr_property(connector_name, "underscan", val),
+            ["off", "on", "auto"],
+            "Shrinks the image slightly to fix edges a TV cuts off"
+        )
     def show_display_change_confirmation(self, property_name, before_value, after_value, revert_fn, timeout_s=15):
         """Ask the user to keep a display change; auto-revert on timeout.
 
