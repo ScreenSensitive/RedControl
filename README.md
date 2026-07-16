@@ -6,7 +6,27 @@
 
 **Low-level dithering & DisplayPort signal control for AMD GPUs on Linux**
 
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-1793D1)
+![GPU: AMD DCN](https://img.shields.io/badge/GPU-AMD%20DCN-ED1C24)
+![Python 3](https://img.shields.io/badge/python-3-3776AB)
+![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)
+
 RedControl talks directly to the AMD display engine (DCN) through UMR — the User Mode Register debugger — to control things no desktop settings panel exposes: per-pipe spatial/temporal dithering, color truncation, and as of v2.1 the DisplayPort stream encoder itself. Built for flicker-sensitive users, display tinkerers, and anyone who needs to know (and change) exactly what signal their AMD GPU is putting on the wire.
+
+## Screenshots
+
+![RedControl — dark mode](docs/screenshot-dark.png)
+
+*Dark, e-ink and warm themes — every dialog and banner follows the active theme.*
+
+## Quick install
+
+```bash
+git clone <this-repo-url> RedControl && cd RedControl
+./install.sh
+```
+
+`install.sh` verifies Python/Tkinter, installs **umr** (the one required dependency) for your distro — or builds it from source — adds an app-menu launcher, and offers to launch. Prefer to do it by hand? See [Requirements](#requirements).
 
 ## Features
 
