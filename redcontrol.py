@@ -22543,7 +22543,7 @@ Restart this tool to detect UMR automatically.
         text_widget = tk.Text(text_frame,
                             wrap=tk.WORD,
                             font=("Courier", 9),
-                            bg="#FFFFFF", fg="#2C2C2C",
+                            bg=self.theme["bg_card"], fg=self.theme["fg"],
                             yscrollcommand=scrollbar.set,
                             height=15)
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -23137,7 +23137,7 @@ Click OK to run the installer (requires sudo password):
         dialog = tk.Toplevel(self.root)
         dialog.title("Manual Installation Required")
         dialog.geometry("600x400")
-        dialog.configure(bg="#FFFFFF")
+        dialog.configure(bg=self.theme["bg_card"])
         dialog.grab_set()
 
         # Center
@@ -23160,25 +23160,25 @@ Click OK to run the installer (requires sudo password):
                 font=("Arial", 16, "bold")).pack(side=tk.LEFT, pady=20)
 
         # Content
-        content = tk.Frame(dialog, bg="#FFFFFF")
+        content = tk.Frame(dialog, bg=self.theme["bg_card"])
         content.pack(fill=tk.BOTH, expand=True, padx=30, pady=20)
 
         tk.Label(content,
                 text="Installation script created but couldn't auto-launch terminal.",
-                bg="#FFFFFF", fg="#2C2C2C",
+                bg=self.theme["bg_card"], fg=self.theme["fg"],
                 font=("Arial", 11),
                 wraplength=520).pack(anchor=tk.W, pady=(0, 15))
 
         tk.Label(content,
                 text="Run this command in your terminal:",
-                bg="#FFFFFF", fg="#2C2C2C",
+                bg=self.theme["bg_card"], fg=self.theme["fg"],
                 font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(0, 5))
 
         # Command box
-        cmd_frame = tk.Frame(content, bg="#F8F9FA", relief=tk.SOLID, bd=1)
+        cmd_frame = tk.Frame(content, bg=self.theme["bg_input"], relief=tk.SOLID, bd=1)
         cmd_frame.pack(fill=tk.X, pady=(0, 15))
 
-        cmd_text = tk.Text(cmd_frame, height=2, bg="#F8F9FA", fg="#2C2C2C",
+        cmd_text = tk.Text(cmd_frame, height=2, bg=self.theme["bg_input"], fg=self.theme["fg"],
                           font=("Monospace", 10), relief=tk.FLAT,
                           wrap=tk.WORD, padx=10, pady=10)
         cmd_text.insert("1.0", f"sudo bash {install_script_path}")
@@ -23187,15 +23187,15 @@ Click OK to run the installer (requires sudo password):
 
         tk.Label(content,
                 text="After running, you'll be prompted for your password.",
-                bg="#FFFFFF", fg="#6C757D",
+                bg=self.theme["bg_card"], fg=self.theme["fg_muted"],
                 font=("Arial", 9)).pack(anchor=tk.W)
 
         # Footer buttons
-        footer = tk.Frame(dialog, bg="#F8F9FA", height=70)
+        footer = tk.Frame(dialog, bg=self.theme["bg_input"], height=70)
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         footer.pack_propagate(False)
 
-        btn_container = tk.Frame(footer, bg="#F8F9FA")
+        btn_container = tk.Frame(footer, bg=self.theme["bg_input"])
         btn_container.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
         def copy_cmd():
@@ -23226,7 +23226,7 @@ Click OK to run the installer (requires sudo password):
         guide = tk.Toplevel(self.root)
         guide.title("Passwordless Auto-Start Setup")
         guide.geometry("700x600")
-        guide.configure(bg="#FFFFFF")
+        guide.configure(bg=self.theme["bg_card"])
 
         # Center window
         guide.update_idletasks()
@@ -23244,12 +23244,12 @@ Click OK to run the installer (requires sudo password):
                 font=("Arial", 16, "bold")).pack(pady=15)
 
         # Content with scrollbar
-        content_frame = tk.Frame(guide, bg="#FFFFFF")
+        content_frame = tk.Frame(guide, bg=self.theme["bg_card"])
         content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        canvas = tk.Canvas(content_frame, bg="#FFFFFF", highlightthickness=0)
+        canvas = tk.Canvas(content_frame, bg=self.theme["bg_card"], highlightthickness=0)
         scrollbar = tk.Scrollbar(content_frame, orient="vertical", command=canvas.yview)
-        scrollable = tk.Frame(canvas, bg="#FFFFFF")
+        scrollable = tk.Frame(canvas, bg=self.theme["bg_card"])
 
         scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=scrollable, anchor="nw")
@@ -23369,16 +23369,16 @@ If auto-start still asks for password:
 """
 
         tk.Label(scrollable, text=guide_text,
-                bg="#FFFFFF", fg="#2C2C2C",
+                bg=self.theme["bg_card"], fg=self.theme["fg"],
                 font=("Monospace", 9),
                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
 
         # Footer buttons
-        footer = tk.Frame(guide, bg="#F8F9FA", height=60)
+        footer = tk.Frame(guide, bg=self.theme["bg_input"], height=60)
         footer.pack(fill=tk.X)
         footer.pack_propagate(False)
 
-        btn_frame = tk.Frame(footer, bg="#F8F9FA")
+        btn_frame = tk.Frame(footer, bg=self.theme["bg_input"])
         btn_frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
         tk.Button(btn_frame, text="Close",
@@ -24754,7 +24754,7 @@ sudo -n umr --version
 
 
         # Separator line
-        tk.Frame(content, bg='#E5E5EA', height=1).pack(fill=tk.X, padx=20, pady=14)
+        tk.Frame(content, bg=self.theme["bg_input"], height=1).pack(fill=tk.X, padx=20, pady=14)
 
         # === Section 2: Advanced Settings ===
         advanced_section = tk.Frame(content, bg=self.bg)
