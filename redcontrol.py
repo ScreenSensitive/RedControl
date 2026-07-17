@@ -24933,6 +24933,31 @@ sudo -n umr --version
         self.create_tooltip(frame_switch, "Per-frame seed change\nPrevents temporal patterns")
         self.frame_random_vars[idx] = frame_var
 
+        # Static Signal Test (CRC) — proves whether temporal dithering is actually active
+        tk.Frame(content, bg=self.theme.get('border', self.bg), height=1).pack(fill=tk.X, padx=20, pady=(6, 12))
+        crc_row = tk.Frame(content, bg=self.bg)
+        crc_row.pack(fill=tk.X, padx=20, pady=(0, 2))
+        tk.Button(crc_row, text="▶  Static Signal Test",
+                  command=lambda i=idx: self.run_static_signal_test(i, self.monitor_connector_names.get(i, "")),
+                  font=('SF Pro Text', 11, 'bold'),
+                  bg=self.theme.get("btn", self.accent), fg=self.theme.get("btn_fg", "white"),
+                  activebackground=self.theme.get("btn", self.accent),
+                  activeforeground=self.theme.get("btn_fg", "white"),
+                  relief='flat', padx=14, pady=6, cursor='hand2').pack(side='left')
+        _crc_info = ("Proves whether temporal dithering is actually active: CRC-hashes ~12 "
+                     "output frames; all identical means STATIC (no temporal dithering).\n\n"
+                     "SCOPE: detects TEMPORAL, GPU-side dithering/FRC only. It cannot see "
+                     "spatial dithering (a fixed per-frame pattern) or monitor-side FRC — "
+                     "neither changes the frames leaving the GPU.\n\n"
+                     "Keep the screen perfectly still during the test, or moving content "
+                     "will report CHANGING even with dithering off.")
+        self.create_info_icon(crc_row, title="Static Signal Test", body=_crc_info, bg=self.bg).pack(side='left', padx=(10, 0))
+        _crc_label = tk.Label(content, text="", font=('SF Pro Text', 11), fg=self.fg, bg=self.bg, justify=tk.LEFT)
+        _crc_label.pack(anchor='w', padx=20, pady=(6, 10))
+        if not hasattr(self, 'crc_labels'):
+            self.crc_labels = {}
+        self.crc_labels[idx] = _crc_label
+
         # Apply to all monitors (dithering only) - placed at bottom of page
         apply_row = tk.Frame(content, bg=self.bg)
         apply_row.pack(fill=tk.X, padx=20, pady=(0, 16))
@@ -26383,35 +26408,6 @@ sudo -n umr --version
                               bg=bg_card).pack(side='left', padx=(8, 0))
 
         # Static Signal Test — prove the output has zero temporal modulation
-        crc_row = tk.Frame(force_card, bg=bg_card)
-        crc_row.pack(anchor='w', pady=(16, 0))
-        crc_btn = tk.Button(crc_row, text="▶  Static Signal Test",
-                            command=lambda: self.run_static_signal_test(idx, connector_name),
-                            font=('SF Pro Text', 10),
-                            bg=bg_card, fg=self.fg,
-                            activebackground=self.theme.get('bg_panel', bg_card),
-                            activeforeground=self.fg,
-                            relief='flat', padx=12, pady=4, cursor='hand2',
-                            highlightthickness=1,
-                            highlightbackground=self.theme.get('border', '#E5E5EA'))
-        crc_btn.pack(side='left')
-        crc_info = (
-            "Uses the display controller's CRC engine to hash every frame leaving this "
-            "pipe — after dithering, LUTs, truncation, everything — and compares about "
-            "a dozen samples over ~1.5 seconds.\n\n"
-            "All CRCs identical → the signal is provably static: zero temporal "
-            "dithering or modulation of any kind.\n\n"
-            "Keep the screen completely still during the test: a blinking text cursor, "
-            "animation, clock tick, or notification also changes frames and will "
-            "report CHANGING even if dithering is off."
-        )
-        self.create_info_icon(crc_row, title="Static Signal Test", body=crc_info,
-                              bg=bg_card).pack(side='left', padx=(8, 0))
-
-        crc_label = tk.Label(force_card, text="",
-                             font=('SF Pro Text', 10), fg=fg_muted, bg=bg_card,
-                             justify=tk.LEFT)
-        crc_label.pack(anchor='w', pady=(6, 0))
 
         self.dp_widgets[idx] = {
             'encoder_var': encoder_var,
@@ -26430,7 +26426,6 @@ sudo -n umr --version
             'lut_bypass_var': lut_bypass_var,
             'lut_saved': None,
             'dynexp_var': dynexp_var,
-            'crc_label': crc_label,
             'dsc_label': dsc_label,
             'mrefresh_label': mrefresh_label,
             'active_pipe': None,
@@ -26897,7 +26892,9 @@ sudo -n umr --version
                          "running", success=True)
 
         samples = []
-        w['crc_label'].config(text="Testing…  keep the screen completely still", fg=self.fg)
+        _lbl0 = getattr(self, 'crc_labels', {}).get(idx)
+        if _lbl0:
+            _lbl0.config(text="Testing…  keep the screen completely still", fg=self.fg)
 
         def _sample(n=0):
             rg = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_CRC0_DATA_RG",
@@ -26921,7 +26918,7 @@ sudo -n umr --version
                 self.run_umr_command(["-i", str(self.gpu_instance), "-wb", reg_field, val])
             valid = [s for s in samples if any(v for v in s if v)]
             # the panel may have refreshed mid-test — write to the CURRENT label
-            lbl = (self.dp_widgets.get(idx) or w).get('crc_label')
+            lbl = getattr(self, 'crc_labels', {}).get(idx)
             if lbl is None:
                 return
             if not valid:
