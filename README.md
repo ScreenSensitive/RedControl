@@ -53,7 +53,7 @@ All AMD GPUs with a DCN (Display Core Next) display engine:
 - **RDNA 3**: Navi 31, 32, 33 (RX 7000 series)
 - **APUs**: Renoir, Cezanne, Rembrandt, Phoenix (Ryzen 4000–7000 integrated graphics)
 
-> **Tested on:** RX 6600 (RDNA 2) and Radeon 780M (RDNA 3 / Phoenix APU). The other GPUs above share the same DCN display engine and *should* work, but haven't each been individually verified — reports welcome.
+> **Tested on:** CachyOS (Arch Linux), Cinnamon on **X11**, with an **RX 6600** (RDNA 2) and **Radeon 780M** (RDNA 3 / Phoenix APU). Other AMD GPUs share the same DCN display engine and *should* work, and other distros/desktops should too — but only the above is verified. **X11 is recommended**; the xrandr-based controls (resolution, refresh, scaling, Broadcast RGB) need X11, though core dithering and the DP/HDMI signal panel also work on Wayland. Reports from other setups welcome.
 
 ## Requirements
 
