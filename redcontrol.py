@@ -21863,6 +21863,12 @@ class RedControl:
     def get_current_underscan(self, connector_name):
         return self._read_xrandr_prop(connector_name, "underscan")
 
+    def get_current_vrr(self, connector_name):
+        v = self._read_xrandr_prop(connector_name, "vrr_capable")
+        if v is None:
+            return "Unknown"
+        return "Supported ✓" if v.strip() in ("1", "on", "true", "True") else "Not supported"
+
     def get_current_link_status(self, connector_name):
         """Read current link status from xrandr (Good/Bad)"""
         try:
@@ -25422,6 +25428,20 @@ sudo -n umr --version
             lambda val: self.set_xrandr_property(connector_name, "underscan", val),
             ["off", "on", "auto"],
             "Shrinks the image slightly to fix edges a TV cuts off"
+        )
+
+        # === Row 3: VRR / FreeSync (read-only — X11 has no runtime toggle) ===
+        grid_container.grid_rowconfigure(3, weight=1)
+        current_vrr = self.get_current_vrr(connector_name)
+        create_property_card(
+            grid_container, 3, 0,
+            "VRR / FreeSync",
+            lambda: current_vrr,
+            None,
+            None,
+            "Variable-refresh capability of this display. Runtime on/off isn't exposed "
+            "on X11 — enable it with the amdgpu 'VariableRefresh' Xorg option if supported.",
+            read_only=True
         )
     def show_display_change_confirmation(self, property_name, before_value, after_value, revert_fn, timeout_s=15):
         """Ask the user to keep a display change; auto-revert on timeout.
