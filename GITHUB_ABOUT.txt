@@ -15,11 +15,10 @@ Topics/tags:
   display  color-depth  tkinter  dcn
 
 Release title:
-  RedControl v2.2 — Display Signal Control
+  RedControl v1.0 — Display Signal Control
 
 Release notes summary:
-  v2.1 adds a DisplayPort Signal panel (live DP stream-encoder readout and
-  DP_COMPONENT_DEPTH forcing via UMR), a safe auto-revert dialog for
-  resolution/refresh changes, and fixes for outputs at power-on default FMT
-  state not appearing. The EDID editor has been removed to keep the tool
-  focused on live signal control.
+  First public release. Per-output spatial/temporal dithering control, color
+  truncation, a live DP/HDMI signal panel with on-wire depth forcing via UMR,
+  GPU/monitor scaling, a CRC static-frame test, and safe auto-revert for risky
+  display changes. For flicker-sensitive users and display tinkerers.

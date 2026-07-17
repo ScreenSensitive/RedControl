@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RedControl v2.2
+RedControl v1.0
 Advanced display pipeline control for AMD GPUs (DCN)
 
 Per-pipe dithering/truncation via the FMT block, color & depth properties,
@@ -33,7 +33,7 @@ import builtins as _builtins
 
 APP_NAME = "RedControl"
 APP_ID = "redcontrol"
-APP_VERSION = "2.2"
+APP_VERSION = "1.0"
 
 # Global app instance for routing warnings/errors into the CMD Log
 APP_INSTANCE = None
@@ -23528,7 +23528,7 @@ sudo -n umr --version
     def show_about(self):
         """Show about dialog"""
         messagebox.showinfo("About RedControl",
-                          "RedControl v2.0\n\n"
+                          "RedControl v1.0\n\n"
                           "Advanced display control for AMD GPUs\n"
                           "Manage dithering, color depth, colorspace, and more.\n\n"
                           "Uses UMR (User Mode Register access) to directly\n"
