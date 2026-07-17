@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RedControl v2.1
+RedControl v2.2
 Advanced display pipeline control for AMD GPUs (DCN)
 
 Per-pipe dithering/truncation via the FMT block, color & depth properties,
@@ -33,7 +33,7 @@ import builtins as _builtins
 
 APP_NAME = "RedControl"
 APP_ID = "redcontrol"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 
 # Global app instance for routing warnings/errors into the CMD Log
 APP_INSTANCE = None
@@ -26877,6 +26877,17 @@ sudo -n umr --version
         return f"{lo}–{hi} Hz"
 
     def run_static_signal_test(self, idx, connector_name):
+        """Warn the user to hold the screen still, then run the CRC test."""
+        _lbl = getattr(self, 'crc_labels', {}).get(idx)
+        if _lbl:
+            _lbl.config(
+                text="⚠  KEEP THE SCREEN STILL — do NOT move the mouse or keyboard, and make\n"
+                     "sure nothing on screen is moving (video, animation, a blinking text cursor).\n"
+                     "Any motion makes the test falsely report CHANGING.   Starting in 3 s…",
+                fg=self.fg)
+        self.root.after(3000, lambda: self._run_static_signal_test_now(idx, connector_name))
+
+    def _run_static_signal_test_now(self, idx, connector_name):
         """CRC-hash ~12 output frames and report whether they are identical."""
         w = self.dp_widgets.get(idx)
         if not w:

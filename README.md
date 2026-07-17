@@ -95,6 +95,17 @@ Open **Signal (DP / HDMI)** in the sidebar for any monitor:
 - **Force Link Depth** writes the encoder's depth field directly (`DP_COMPONENT_DEPTH` on DP, `HDMI_DEEP_COLOR_DEPTH`/`ENABLE` on HDMI). Every force goes through a Keep/Revert dialog that auto-reverts in 15 s if unanswered. **Pin (auto-reapply)** keeps a forced depth alive: a watchdog reapplies it whenever the driver resets the register on a modeset or monitor sleep/wake.
 - **Why no 6 bpc on HDMI**: DisplayPort defines an 18-bit link format; HDMI's minimum is 24-bit RGB. For 6-bit output on HDMI, use Truncate → 6-bit or 6-bit spatial dithering — the wire stays 8 bpc but only 6 bits carry content.
 
+## What's new in 2.2
+
+- **Dark mode fixed** — every dialog, banner and readout follows the theme (no more blinding white pop-ups or hidden text).
+- **Static Signal Test moved to the Dithering page** with a "hold the screen still" warning and a clear scope note: it detects *temporal, GPU-side* dithering only — not spatial dithering, monitor-side FRC, or backlight PWM.
+- **GPU / monitor scaling** — None / Full / Center / Full aspect (like NVIDIA's scaling), plus underscan (overscan fix).
+- **VRR / FreeSync status** card that reflects the display's capability.
+- **Read bug fixed** — Link Status, TearFree and Broadcast RGB were silently failing to read (the monitor's EDID pushed the value past a scan window); now correct.
+- **Scrollable sections** (mouse wheel, trackpad, touch drag) so nothing clips; clearer section titles + subtitles; *Display Properties → Display*.
+- **First-run safety disclaimer** and a one-command **`install.sh`** (checks deps, installs umr, adds a launcher).
+- **Under the hood** — cached `xrandr --props` (faster page renders), safer error handling, and repo polish (badges, screenshots, CONTRIBUTING, issue templates).
+
 ## What changed in 2.1
 
 - **Added**: Signal section — DIG encoder readout (DP & HDMI) with on-wire depth forcing via UMR, DP++ adapter detection
