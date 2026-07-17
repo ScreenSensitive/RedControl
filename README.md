@@ -17,8 +17,6 @@ RedControl talks directly to the AMD display engine (DCN) through UMR — the Us
 
 ![RedControl — dark mode](docs/screenshot-dark.png)
 
-*Dark, e-ink and warm themes — every dialog and banner follows the active theme.*
-
 ## Quick install
 
 ```bash
