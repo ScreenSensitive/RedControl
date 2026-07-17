@@ -12,6 +12,7 @@ import re
 import sys
 import os
 import json
+import time
 import glob
 import shutil
 import base64
@@ -19062,7 +19063,7 @@ class ToolTip:
                             font=("Arial", 9), padx=10, pady=6,
                             justify=tk.LEFT)
             label.pack()
-        except:
+        except Exception:
             pass
 
     def hide_tooltip(self, event=None):
@@ -19073,7 +19074,7 @@ class ToolTip:
         if self.tooltip:
             try:
                 self.tooltip.destroy()
-            except:
+            except Exception:
                 pass
             self.tooltip = None
 
@@ -19084,13 +19085,13 @@ class ToolTip:
             if tt and tt.tooltip:
                 try:
                     tt.tooltip.destroy()
-                except:
+                except Exception:
                     pass
                 tt.tooltip = None
             if tt and tt.after_id:
                 try:
                     tt.widget.after_cancel(tt.after_id)
-                except:
+                except Exception:
                     pass
                 tt.after_id = None
 
@@ -20295,7 +20296,7 @@ class RedControl:
                     # Real X11 shows many properties
                     if len(output) < 500 or 'XWAYLAND' in output.upper():
                         return True
-            except:
+            except Exception:
                 pass
 
             return False
@@ -20393,7 +20394,7 @@ class RedControl:
         except subprocess.TimeoutExpired:
             # Timeout means it's waiting for password (password required)
             return False
-        except:
+        except Exception:
             return False
 
     def is_passwordless_enabled(self):
@@ -20407,7 +20408,7 @@ class RedControl:
                                   timeout=0.5)
             # If returncode is 0, passwordless is enabled
             return result.returncode == 0
-        except:
+        except Exception:
             return False
 
     def enable_passwordless_access(self):
@@ -20503,7 +20504,7 @@ class RedControl:
             # Clean up temp file
             try:
                 os.remove('/tmp/umr-passwordless-sudoers')
-            except:
+            except Exception:
                 pass
 
     def enable_passwordless_access_with_password(self, password):
@@ -20581,7 +20582,7 @@ class RedControl:
                             console_print("DEBUG: ✅ VERIFIED: File exists at /etc/sudoers.d/umr-passwordless")
                         else:
                             console_print("DEBUG: ❌ WARNING: File does NOT exist at /etc/sudoers.d/umr-passwordless")
-                    except:
+                    except Exception:
                         console_print("DEBUG: Could not verify file (permission denied on directory)")
 
                     messagebox.showinfo(
@@ -20621,7 +20622,7 @@ class RedControl:
                 console_print("DEBUG: Cleaned up temp file")
             except Exception as e:
                 console_print(f"DEBUG: Failed to clean up temp file: {e}")
-            except:
+            except Exception:
                 pass
 
     def disable_passwordless_access(self):
@@ -20839,6 +20840,21 @@ class RedControl:
 
         return result
 
+    def _get_xrandr_props(self, max_age=1.5):
+        """Cached `xrandr --props` output — collapses a page render's many
+        property reads into a single subprocess call."""
+        now = time.monotonic()
+        c = getattr(self, "_xrandr_props_cache", None)
+        if c and (now - c[0]) < max_age:
+            return c[1]
+        try:
+            out = subprocess.run(['xrandr', '--props'], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except Exception:
+            out = c[1] if c else ""
+        self._xrandr_props_cache = (now, out)
+        return out
+
     def run_umr_command(self, args):
         """Run UMR command with sudo if not already root"""
         try:
@@ -20934,7 +20950,7 @@ class RedControl:
                     # Reset if we found instance but no PCI on same line
                     if 'instance:' in line:
                         in_our_gpu = False
-        except:
+        except Exception:
             pass
         
         # Method 2: Try sysfs - check all card devices
@@ -20953,9 +20969,9 @@ class RedControl:
                         card_num = re.search(r'card(\d+)', card_path)
                         if card_num and int(card_num.group(1)) == instance:
                             return pci_addr
-                except:
+                except Exception:
                     continue
-        except:
+        except Exception:
             pass
             
         return None
@@ -21051,7 +21067,7 @@ class RedControl:
                     if codename_match:
                         return codename_match.group(1).strip()
                     return gpu_name
-        except:
+        except Exception:
             pass
 
         return None
@@ -21558,7 +21574,7 @@ class RedControl:
                         except Exception as e:
                             console_print(f"  Exception during sudo: {e}")
                             pass
-                    except:
+                    except Exception:
                         continue
 
             # Fallback: Try connector mapping
@@ -21618,11 +21634,11 @@ class RedControl:
                                                             colorspace = stdout.strip()
                                                             console_print(f"Found colorspace for {connector_name}: {colorspace} at {crtc_path}")
                                                             return colorspace
-                                                except:
+                                                except Exception:
                                                     pass
-                                            except:
+                                            except Exception:
                                                 continue
-                    except:
+                    except Exception:
                         continue
 
             # Final fallback: Scan all available colorspace files
@@ -21658,7 +21674,7 @@ class RedControl:
                                 colorspace = stdout.strip()
                                 console_print(f"Found colorspace (fallback): {colorspace} at {path}")
                                 return colorspace
-                    except:
+                    except Exception:
                         pass
                 except (FileNotFoundError, OSError):
                     continue
@@ -21714,9 +21730,9 @@ class RedControl:
                                                         if colorspace and colorspace != "":
                                                             console_print(f"Found colorspace for {connector_name}: {colorspace} at {crtc_path}")
                                                             return colorspace
-                                            except:
+                                            except Exception:
                                                 continue
-                    except:
+                    except Exception:
                         continue
 
             # Final fallback: Scan all available colorspace files
@@ -21761,12 +21777,7 @@ class RedControl:
         """Read current Broadcast RGB value from xrandr"""
         try:
             # Use xrandr --props (NOT --output X --props, that doesn't work on some systems)
-            result = subprocess.run(['xrandr', '--props'],
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                return None
-
-            lines = result.stdout.split('\n')
+            lines = self._get_xrandr_props().split('\n')
             found_connector = False
 
             for i, line in enumerate(lines):
@@ -21799,12 +21810,7 @@ class RedControl:
     def get_current_tearfree(self, connector_name):
         """Read current TearFree value from xrandr"""
         try:
-            result = subprocess.run(['xrandr', '--props'],
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                return None
-
-            lines = result.stdout.split('\n')
+            lines = self._get_xrandr_props().split('\n')
 
             for i, line in enumerate(lines):
                 # Check if this is our connector line
@@ -21835,10 +21841,7 @@ class RedControl:
     def _read_xrandr_prop(self, connector_name, prop):
         """Read a single xrandr connector property value (or None)."""
         try:
-            result = subprocess.run(['xrandr', '--props'], capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                return None
-            lines = result.stdout.split('\n')
+            lines = self._get_xrandr_props().split('\n')
             for i, line in enumerate(lines):
                 if line.startswith(connector_name + ' '):
                     for j in range(i + 1, min(i + 400, len(lines))):
@@ -21863,12 +21866,7 @@ class RedControl:
     def get_current_link_status(self, connector_name):
         """Read current link status from xrandr (Good/Bad)"""
         try:
-            result = subprocess.run(['xrandr', '--props'],
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                return None
-
-            lines = result.stdout.split('\n')
+            lines = self._get_xrandr_props().split('\n')
 
             for i, line in enumerate(lines):
                 # Check if this is our connector line
@@ -21951,7 +21949,7 @@ class RedControl:
                                 # Product ID: bytes 10-11 (little-endian)
                                 prod_bytes = bytes.fromhex(edid_str[20:24])  # bytes 10-11
                                 product_id = (prod_bytes[1] << 8) | prod_bytes[0]
-                            except:
+                            except Exception:
                                 pass
 
                         # Look for descriptor blocks (bytes 54-125) for monitor name
@@ -22219,7 +22217,7 @@ class RedControl:
                 with open(self.settings_file, 'r') as f:
                     return json.load(f)
             return {}
-        except:
+        except Exception:
             return {}
 
     def save_settings(self, settings):
@@ -22573,7 +22571,7 @@ class RedControl:
         import webbrowser
         try:
             webbrowser.open(url)
-        except:
+        except Exception:
             messagebox.showinfo("URL", f"Please visit:\n{url}")
 
     def show_umr_install_guide(self):
@@ -22675,14 +22673,14 @@ Restart this tool to detect UMR automatically.
         import webbrowser
         try:
             webbrowser.open(url)
-        except:
+        except Exception:
             # Copy to clipboard as fallback
             try:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(url)
                 self.root.update()
                 messagebox.showinfo("URL Copied", f"URL copied to clipboard:\n{url}")
-            except:
+            except Exception:
                 messagebox.showinfo("URL", f"Please visit:\n{url}")
 
     def check_autostart_enabled(self):
@@ -23550,7 +23548,7 @@ sudo -n umr --version
                 try:
                     subprocess.run(['systemctl', '--user', 'disable', 'redcontrol.service'],
                                  capture_output=True)
-                except:
+                except Exception:
                     pass
 
             if not removed:
@@ -23835,7 +23833,7 @@ sudo -n umr --version
                                f"Failed to copy to clipboard:\n{e}\n\n"
                                f"Please copy manually:\n{url}",
                                parent=parent_window)
-        except:
+        except Exception:
             pass
 
     def restore_monitor_settings(self, idx, connector_name):
@@ -24184,7 +24182,7 @@ sudo -n umr --version
                                 # File doesn't exist = no VRAM (iGPU)
                                 console_print(f"DEBUG: No VRAM vendor file for instance {self.gpu_instance} (PCI {pci_addr}) - likely iGPU")
                                 return "Unknown"
-                        except:
+                        except Exception:
                             continue
             
             # Fallback: try all card devices (if instance mapping failed)
@@ -24243,7 +24241,7 @@ sudo -n umr --version
                                         return vram_info
                                 # No VRAM file = iGPU
                                 return vram_info
-                        except:
+                        except Exception:
                             continue
             
             # Fallback: try to get VRAM size from any card
@@ -24253,7 +24251,7 @@ sudo -n umr --version
                     vram_bytes = int(f.read().strip())
                     vram_gb = vram_bytes / (1024**3)
                     vram_info['size'] = f"{vram_gb:.1f} GB"
-        except:
+        except Exception:
             pass
         
         return vram_info
@@ -25074,7 +25072,7 @@ sudo -n umr --version
         # === Colorspace Card (Top Right) ===
         try:
             current_colorspace = self.get_current_colorspace_from_debugfs(connector_name, monitor_index=idx)
-        except:
+        except Exception:
             current_colorspace = None
         
         cs_card, cs_label, cs_var = create_control_card(
@@ -25526,7 +25524,7 @@ sudo -n umr --version
                             if res_match:
                                 before_value = f"{res_match.group(1)}x{res_match.group(2)}"
                             break
-            except:
+            except Exception:
                 pass
 
             # Don't change if already at this resolution
@@ -25580,7 +25578,7 @@ sudo -n umr --version
             # Log exception
             try:
                 self.log_command(f"{connector_name}: Resolution", "Unknown", "xrandr --mode", f"Exception: {str(e)[:50]}", success=False)
-            except:
+            except Exception:
                 pass
 
     def set_refresh_rate(self, connector_name, rate_str):
@@ -25607,7 +25605,7 @@ sudo -n umr --version
                                         before_value = f"{before_rate_numeric}Hz"
                                     break
                             break
-            except:
+            except Exception:
                 pass
 
             # Get current resolution
@@ -25622,7 +25620,7 @@ sudo -n umr --version
                             if res_match:
                                 resolution = f"{res_match.group(1)}x{res_match.group(2)}"
                             break
-            except:
+            except Exception:
                 pass
 
             if not resolution:
@@ -25681,7 +25679,7 @@ sudo -n umr --version
             # Log exception
             try:
                 self.log_command(f"{connector_name}: Refresh Rate", "Unknown", "xrandr --rate", f"Exception: {str(e)[:50]}", success=False)
-            except:
+            except Exception:
                 pass
 
     def create_debug_tab(self):
@@ -25913,6 +25911,7 @@ sudo -n umr --version
 
     def set_xrandr_property(self, connector_name, property_name, value):
         """Set xrandr property for a connector"""
+        self._xrandr_props_cache = None  # value about to change
         try:
             # Read current value before changing (for debug log)
             before_value = "Unknown"
@@ -25932,7 +25931,7 @@ sudo -n umr --version
                                     if match:
                                         before_value = match.group(1).strip()
                             break
-            except:
+            except Exception:
                 pass
 
             # Convert value to string for command
@@ -25966,7 +25965,7 @@ sudo -n umr --version
             # Log exception
             try:
                 self.log_command(f"{connector_name}: {property_name}", "Unknown", "xrandr command", f"Exception: {str(e)[:50]}", success=False)
-            except:
+            except Exception:
                 pass
 
     def set_colorspace_and_update(self, idx, connector_name, colorspace_value):
