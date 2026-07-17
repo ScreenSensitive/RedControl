@@ -4,14 +4,14 @@
   <img src="redcontrol-icon.png" alt="RedControl Icon" width="128" height="128">
 </p>
 
-**Low-level dithering & DisplayPort signal control for AMD GPUs on Linux**
+**Low-level dithering & display-signal control (DisplayPort + HDMI) for AMD GPUs on Linux**
 
 ![Platform: Linux](https://img.shields.io/badge/platform-Linux-1793D1)
 ![GPU: AMD DCN](https://img.shields.io/badge/GPU-AMD%20DCN-ED1C24)
 ![Python 3](https://img.shields.io/badge/python-3-3776AB)
 ![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)
 
-RedControl talks directly to the AMD display engine (DCN) through UMR — the User Mode Register debugger — to control things no desktop settings panel exposes: per-pipe spatial/temporal dithering, color truncation, and as of v2.1 the DisplayPort stream encoder itself. Built for flicker-sensitive users, display tinkerers, and anyone who needs to know (and change) exactly what signal their AMD GPU is putting on the wire.
+RedControl talks directly to the AMD display engine (DCN) through UMR — the User Mode Register debugger — to control things no desktop settings panel exposes: per-pipe spatial/temporal dithering, color truncation, and as of v2.1 the display stream encoder itself (DisplayPort and HDMI). Built for flicker-sensitive users, display tinkerers, and anyone who needs to know (and change) exactly what signal their AMD GPU is putting on the wire.
 
 ## Screenshots
 
@@ -52,6 +52,8 @@ All AMD GPUs with a DCN (Display Core Next) display engine:
 - **RDNA 2**: Navi 21, 22, 23, 24 (RX 6000 series)
 - **RDNA 3**: Navi 31, 32, 33 (RX 7000 series)
 - **APUs**: Renoir, Cezanne, Rembrandt, Phoenix (Ryzen 4000–7000 integrated graphics)
+
+> **Tested on:** RX 6600 (RDNA 2) and Radeon 780M (RDNA 3 / Phoenix APU). The other GPUs above share the same DCN display engine and *should* work, but haven't each been individually verified — reports welcome.
 
 ## Requirements
 

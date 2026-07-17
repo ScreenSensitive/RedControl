@@ -2,12 +2,12 @@ Repository name:
   redcontrol
 
 Title (for the README / release):
-  RedControl — Dithering & DisplayPort Signal Control for AMD GPUs on Linux
+  RedControl — Dithering & Display Signal Control for AMD GPUs on Linux
 
 Short description (GitHub "About" box, max ~350 chars):
   GUI for low-level AMD GPU display control on Linux. Toggle spatial/temporal
-  dithering per output, force color truncation, and read/force the DisplayPort
-  stream encoder's pixel encoding & component depth via UMR. For
+  dithering per output, force color truncation, and read/force the display
+  stream encoder's pixel encoding & component depth (DisplayPort + HDMI) via UMR. For
   flicker-sensitive users and display tinkerers. No modeset required.
 
 Topics/tags:
@@ -15,7 +15,7 @@ Topics/tags:
   display  color-depth  tkinter  dcn
 
 Release title:
-  RedControl v2.1 — DisplayPort Signal Control
+  RedControl v2.2 — Display Signal Control
 
 Release notes summary:
   v2.1 adds a DisplayPort Signal panel (live DP stream-encoder readout and
