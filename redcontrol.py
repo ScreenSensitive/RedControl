@@ -26920,20 +26920,24 @@ sudo -n umr --version
             ]:
                 self.run_umr_command(["-i", str(self.gpu_instance), "-wb", reg_field, val])
             valid = [s for s in samples if any(v for v in s if v)]
+            # the panel may have refreshed mid-test — write to the CURRENT label
+            lbl = (self.dp_widgets.get(idx) or w).get('crc_label')
+            if lbl is None:
+                return
             if not valid:
-                w['crc_label'].config(text="Result:  no CRC data captured — try again", fg=self.fg)
+                lbl.config(text="Result:  no CRC data captured — try again", fg=self.fg)
                 return
             uniq = len(set(valid))
             if uniq == 1:
-                w['crc_label'].config(
-                    text=f"Result:  STATIC ✓  ({len(valid)} samples, every frame identical)",
-                    fg="#3fb950")
+                lbl.config(
+                    text=f"✓  STATIC — no temporal dithering  ({len(valid)} identical frames)",
+                    fg=self.fg)
                 self.show_status("Static signal confirmed — no temporal modulation", "info")
             else:
-                w['crc_label'].config(
-                    text=f"Result:  CHANGING  ({uniq} distinct frames in {len(valid)} samples)\n"
-                         "Temporal dithering, DRR, or on-screen content is modulating frames.",
-                    fg="#d29922")
+                lbl.config(
+                    text=f"⚠  CHANGING — {uniq} distinct frames of {len(valid)}\n"
+                         "Temporal dithering, variable refresh, or moving content is modulating frames.",
+                    fg=self.fg)
                 self.show_status("Signal is changing frame-to-frame", "warn")
 
         # give the CRC engine a frame or two to start producing data
