@@ -19410,6 +19410,13 @@ class RedControl:
             self.root.after(1800, self.auto_apply_saved_settings)
         except Exception:
             pass
+        # Auto-Reapply persists across restarts, so start its watchdog here
+        # rather than waiting for a forced depth to start the tick loop.
+        try:
+            if self.auto_reapply_enabled():
+                self.root.after(2400, self._start_signal_pin_watchdog)
+        except Exception:
+            pass
 
     def maybe_show_first_run(self):
         """Show a one-time 'use at your own risk' notice on first launch."""
@@ -19422,7 +19429,7 @@ class RedControl:
                 "RedControl changes low-level AMD display registers directly (via umr).\n\n"
                 "\u2022 Normally safe, but on rare hardware a bad setting can briefly glitch "
                 "or blank the screen.\n"
-                "\u2022 Risky changes (resolution / refresh) auto-revert after 15 seconds if "
+                "\u2022 Risky changes (resolution / refresh) auto-revert after 10 seconds if "
                 "the screen goes blank \u2014 just wait it out.\n"
                 "\u2022 Every change is shown as the exact umr command in the Command Log, "
                 "so nothing is hidden.\n\n"
@@ -19786,7 +19793,9 @@ class RedControl:
         self.root.config(menu=menubar)
 
         autostart_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Auto-Start", menu=autostart_menu)
+        # Holds startup, auto-apply, auto-reapply and authentication options, so
+        # "Auto-Start" no longer describes it.
+        menubar.add_cascade(label="Settings", menu=autostart_menu)
 
         autostart_enabled, points_here, _ = self.autostart_state()
         if autostart_enabled and not points_here:
@@ -19808,6 +19817,11 @@ class RedControl:
             onvalue=True, offvalue=False,
             variable=self._auto_apply_menu_var(),
             command=self.toggle_auto_apply)
+        autostart_menu.add_checkbutton(
+            label="Auto-Reapply if the driver resets them",
+            onvalue=True, offvalue=False,
+            variable=self._auto_reapply_menu_var(),
+            command=self.toggle_auto_reapply)
 
         autostart_menu.add_separator()
         autostart_menu.add_command(
@@ -20674,7 +20688,10 @@ class RedControl:
                 "RedControl no longer needs it.\n\n"
                 "Remove it now? You will be asked for your password."):
             return
-        self.remove_legacy_sudoers()
+        if self.remove_legacy_sudoers():
+            # The menubar was built before this ran, so it still offers the
+            # removal entry until it is rebuilt.
+            self.refresh_menubar()
 
     def remove_legacy_sudoers(self):
         argv = ['pkexec'] if shutil.which('pkexec') else ['sudo']
@@ -22289,6 +22306,40 @@ class RedControl:
             self.show_status(f"Auto-applied saved settings to {applied} monitor(s).",
                              "success")
 
+    def sync_connector_ui_from_system(self, idx, connector_name=None):
+        """Refresh the bpc / colorspace / RGB-range dropdowns from the system.
+
+        These three were only ever populated by restore_monitor_settings(),
+        i.e. from the saved JSON, so they showed the last value written rather
+        than the current one. Readers for all three already existed; they were
+        simply never called on refresh.
+        """
+        if connector_name is None:
+            connector_name = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx)
+        if not connector_name:
+            return
+
+        try:
+            bpc = self.get_connector_max_bpc(connector_name)
+            if bpc and idx in getattr(self, 'bpc_vars', {}):
+                self.bpc_vars[idx].set(str(bpc))
+        except Exception as exc:
+            self.log_debug(f"bpc refresh for {connector_name} failed: {exc}")
+
+        try:
+            rgb = self.get_current_broadcast_rgb(connector_name)
+            if rgb and idx in getattr(self, 'rgb_range_vars', {}):
+                self.rgb_range_vars[idx].set(rgb)
+        except Exception as exc:
+            self.log_debug(f"RGB range refresh for {connector_name} failed: {exc}")
+
+        try:
+            cs = self.get_current_colorspace_from_debugfs(connector_name, idx)
+            if cs and idx in getattr(self, 'colorspace_vars', {}):
+                self.colorspace_vars[idx].set(cs)
+        except Exception as exc:
+            self.log_debug(f"colorspace refresh for {connector_name} failed: {exc}")
+
     def sync_current_tab_from_hw(self):
         """Re-read the visible monitor's registers into its controls.
 
@@ -22308,6 +22359,10 @@ class RedControl:
             self.refresh_status(idx)
         except Exception as exc:
             self.log_debug(f"refresh_status({idx}) failed: {exc}")
+        try:
+            self.sync_connector_ui_from_system(idx)
+        except Exception as exc:
+            self.log_debug(f"sync_connector_ui_from_system({idx}) failed: {exc}")
 
     def show_active_section(self):
         """Show the active section page for the currently selected monitor tab."""
@@ -22627,7 +22682,9 @@ Restart this tool to detect UMR automatically.
 
         # Auto-Start menu (renamed from Settings)
         autostart_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Auto-Start", menu=autostart_menu)
+        # Holds startup, auto-apply, auto-reapply and authentication options, so
+        # "Auto-Start" no longer describes it.
+        menubar.add_cascade(label="Settings", menu=autostart_menu)
 
         # Auto-Start section
         autostart_enabled, points_here, _ = self.autostart_state()
@@ -22646,6 +22703,11 @@ Restart this tool to detect UMR automatically.
             onvalue=True, offvalue=False,
             variable=self._auto_apply_menu_var(),
             command=self.toggle_auto_apply)
+        autostart_menu.add_checkbutton(
+            label="Auto-Reapply if the driver resets them",
+            onvalue=True, offvalue=False,
+            variable=self._auto_reapply_menu_var(),
+            command=self.toggle_auto_reapply)
 
         autostart_menu.add_separator()
         autostart_menu.add_command(
@@ -24947,7 +25009,7 @@ sudo -n umr --version
             "on X11 — enable it with the amdgpu 'VariableRefresh' Xorg option if supported.",
             read_only=True
         )
-    def show_display_change_confirmation(self, property_name, before_value, after_value, revert_fn, timeout_s=15):
+    def show_display_change_confirmation(self, property_name, before_value, after_value, revert_fn, timeout_s=10):
         """Ask the user to keep a display change; auto-revert on timeout.
 
         Shows a modal 'Keep these settings?' dialog with a countdown. If the
@@ -25815,7 +25877,7 @@ sudo -n umr --version
             "since deep color changes the TMDS clock ratio, which normally requires "
             "link retraining.\n\n"
             "Every force shows a Keep/Revert confirmation; if you don't answer "
-            "within 15 seconds (e.g. the screen went blank), it reverts "
+            "within 10 seconds (e.g. the screen went blank), it reverts "
             "automatically.\n\n"
             "This is different from Max BPC in Color / Depth: Max BPC is a driver "
             "policy cap that takes effect at the next modeset; this changes what the "
@@ -25855,28 +25917,9 @@ sudo -n umr --version
                               justify=tk.LEFT)
         force_note.pack(anchor='w')
 
-        # Pin: watchdog reapplies the forced depth when the driver resets it
-        pin_row = tk.Frame(force_card, bg=bg_card)
-        pin_row.pack(anchor='w', pady=(14, 0))
-        tk.Label(pin_row, text="Pin (auto-reapply)",
-                 font=('SF Pro Text', 12), fg=self.fg, bg=bg_card).pack(side='left')
-        pin_var = tk.BooleanVar(value=False)
-        pin_switch = ToggleSwitch(
-            pin_row, pin_var,
-            command=lambda: self.toggle_signal_pin(idx, connector_name),
-            bg=bg_card)
-        pin_switch.pack(side='left', padx=(16, 0))
-        pin_info = (
-            "The driver rewrites the encoder registers on every modeset — resolution or "
-            "refresh change, monitor sleep/wake, sometimes GPU power events — which "
-            "silently undoes a forced depth.\n\n"
-            "Pin watches the register every few seconds and reapplies your forced depth "
-            "whenever the driver resets it. Reapplies are logged in the CMD Log.\n\n"
-            "Requires passwordless UMR access (Auto-Start → Passwordless Access), since "
-            "the watchdog can't prompt for a password in the background."
-        )
-        self.create_info_icon(pin_row, title="Pin", body=pin_info,
-                              bg=bg_card).pack(side='left', padx=(8, 0))
+        # The old per-monitor "Pin" switch lived here. It duplicated Auto-Reapply
+        # (Settings menu), which now restores a forced depth as well as the
+        # dither settings, so keeping both meant two switches for one job.
 
         # Bypass the driver's color LUTs on this pipe
         lut_row = tk.Frame(force_card, bg=bg_card)
@@ -25952,7 +25995,8 @@ sudo -n umr --version
             'dsc_label': dsc_label,
             'mrefresh_label': mrefresh_label,
             'active_pipe': None,
-            'pin_var': pin_var,
+            # Depth the user asked to hold; Auto-Reapply restores it after a
+            # modeset. Set when a forced depth is kept.
             'pinned_label': None,
             'link_label': link_label,
             'force_depth_var': force_depth_var,
@@ -26247,8 +26291,8 @@ sudo -n umr --version
                 self.log_command(f"{connector_name}: DP Component Depth",
                                  before, command, label, success=True)
                 self.show_status(f"DIG{enc} DP component depth → {label}", "info")
-                if w['pin_var'].get():
-                    w['pinned_label'] = label
+                w['pinned_label'] = label
+                self._start_signal_pin_watchdog()
             else:
                 self.log_command(f"{connector_name}: DP Component Depth",
                                  label, f"Reverted to {before}", before, success=True)
@@ -26296,8 +26340,8 @@ sudo -n umr --version
             self.log_command(f"{connector_name}: HDMI Deep Color",
                              before, command, label, success=True)
             self.show_status(f"DIG{enc} HDMI deep color → {label}", "info")
-            if w['pin_var'].get():
-                w['pinned_label'] = label
+            w['pinned_label'] = label
+            self._start_signal_pin_watchdog()
         else:
             self.log_command(f"{connector_name}: HDMI Deep Color",
                              label, f"Reverted to {before}", before, success=True)
@@ -26396,6 +26440,11 @@ sudo -n umr --version
         if pipe is None:
             pipe = idx
 
+        # Auto-Reapply writes registers and posts status text on its 5-second
+        # tick. Both perturb the frame, and the CRC covers the whole screen, so
+        # a tick landing mid-test reads as "signal changing". Hold it off.
+        self._crc_test_active = True
+
         # The CRC engine only produces data with a capture window selected —
         # program window A to cover the active area (like the driver does).
         hres, vres = 4095, 4095
@@ -26446,6 +26495,7 @@ sudo -n umr --version
                 (f"{winy}.OTG_CRC0_WINDOWA_Y_END", "0"),
             ]:
                 self.run_umr_command(["-i", str(self.gpu_instance), "-wb", reg_field, val])
+            self._crc_test_active = False
             valid = [s for s in samples if any(v for v in s if v)]
             # the panel may have refreshed mid-test — write to the CURRENT label
             lbl = getattr(self, 'crc_labels', {}).get(idx)
@@ -26463,9 +26513,15 @@ sudo -n umr --version
             else:
                 lbl.config(
                     text=f"⚠  CHANGING — {uniq} distinct frames of {len(valid)}\n"
-                         "Temporal dithering, variable refresh, or moving content is modulating frames.",
+                         "The CRC covers the whole screen, so anything that repaints "
+                         "counts: a taskbar clock, a blinking cursor, a notification.\n"
+                         "Rule those out first — cover the screen with a still image "
+                         "and retest. Only then does this indicate temporal dithering "
+                         "or variable refresh.",
                     fg=self.fg)
-                self.show_status("Signal is changing frame-to-frame", "warn")
+                self.show_status(
+                    "Signal changing frame-to-frame — rule out on-screen motion first",
+                    "warn")
 
         # give the CRC engine a frame or two to start producing data
         self.root.after(300, lambda: _sample())
@@ -26584,20 +26640,6 @@ sudo -n umr --version
 
         self.root.after(2000, _finish)
 
-    def toggle_signal_pin(self, idx, connector_name):
-        """Enable/disable the auto-reapply watchdog for this output's forced depth."""
-        w = self.dp_widgets.get(idx)
-        if not w:
-            return
-        if w['pin_var'].get():
-            w['pinned_label'] = w['force_depth_var'].get()
-            self._start_signal_pin_watchdog()
-            self.show_status(
-                f"Pinned {w['pinned_label']} on {connector_name} — reapplies automatically", "info")
-        else:
-            w['pinned_label'] = None
-            self.show_status(f"Unpinned link depth for {connector_name}", "info")
-
     def _start_signal_pin_watchdog(self):
         if getattr(self, '_pin_watchdog_on', False):
             return
@@ -26605,19 +26647,28 @@ sudo -n umr --version
         self.root.after(5000, self._signal_pin_tick)
 
     def _signal_pin_tick(self):
-        """Every 5 s: reapply any pinned depth the driver has reset."""
+        """Every 5 s, while Auto-Reapply is on: restore anything the driver reset.
+
+        Covers both the forced link depth (recorded when a force is kept) and
+        the FMT dither/truncate settings.
+        """
         try:
-            pinned = [(idx, w) for idx, w in getattr(self, 'dp_widgets', {}).items()
-                      if w.get('pin_var') is not None and w['pin_var'].get()
-                      and w.get('pinned_label')]
             # Never raise an auth dialog from a background timer: only reapply
             # once the user has already authorised the helper this session.
-            if pinned and (os.geteuid() == 0 or self._helper_authorized):
-                for idx, w in pinned:
-                    try:
-                        self._pin_reapply_if_needed(idx, w)
-                    except Exception as e:
-                        self.log_debug(f"Pin reapply failed for idx {idx}: {e}")
+            authorised = (os.geteuid() == 0 or self._helper_authorized)
+            if not (authorised and self.auto_reapply_enabled()):
+                return
+            if getattr(self, '_crc_test_active', False):
+                return  # a CRC capture is running; writing now would skew it
+
+            pinned = [(idx, w) for idx, w in getattr(self, 'dp_widgets', {}).items()
+                      if w.get('pinned_label')]
+            for idx, w in pinned:
+                try:
+                    self._pin_reapply_if_needed(idx, w)
+                except Exception as e:
+                    self.log_debug(f"Depth reapply failed for idx {idx}: {e}")
+            self._reapply_tick()
         except Exception:
             pass
         finally:
@@ -26625,6 +26676,91 @@ sudo -n umr --version
                 self.root.after(5000, self._signal_pin_tick)
             except Exception:
                 self._pin_watchdog_on = False
+
+    # ---- Auto-Reapply: keep settings applied across modesets ----------------
+    # Replaces the old per-monitor Pin switch, which guarded bit depth only.
+    # The same watchdog now also covers the FMT dithering/truncation registers
+    # on every connected monitor, comparing hardware against what the UI says
+    # and rewriting only the fields that drifted.
+
+    REAPPLY_FIELDS = (
+        ('spatial_vars', 'FMT_SPATIAL_DITHER_EN'),
+        ('temporal_vars', 'FMT_TEMPORAL_DITHER_EN'),
+        ('rgb_random_vars', 'FMT_RGB_RANDOM_ENABLE'),
+        ('highpass_random_vars', 'FMT_HIGHPASS_RANDOM_ENABLE'),
+        ('frame_random_vars', 'FMT_FRAME_RANDOM_ENABLE'),
+        ('truncate_vars', 'FMT_TRUNCATE_EN'),
+    )
+
+    def auto_reapply_enabled(self):
+        return bool((self.load_settings() or {}).get('auto_reapply', False))
+
+    def _auto_reapply_menu_var(self):
+        var = getattr(self, '_auto_reapply_var', None)
+        if var is None:
+            var = tk.BooleanVar()
+            self._auto_reapply_var = var
+        var.set(self.auto_reapply_enabled())
+        return var
+
+    def toggle_auto_reapply(self):
+        settings = self.load_settings() or {}
+        new_state = not settings.get('auto_reapply', False)
+        settings['auto_reapply'] = new_state
+        self.save_settings(settings)
+        if new_state:
+            # The tick loop is otherwise only started by switching on a Pin.
+            self._start_signal_pin_watchdog()
+            messagebox.showinfo(
+                "Auto-Reapply On ✓",
+                "RedControl will check every connected monitor every 5 seconds "
+                "and restore any setting the driver has reset — dithering, "
+                "truncation, and a forced link depth.\n\n"
+                "Modesets, monitor sleep/wake and some GPU power events all "
+                "undo these silently.")
+        else:
+            self.show_status("Auto-Reapply off — settings are no longer restored.", "info")
+        self.refresh_menubar()
+
+    def _reapply_tick(self):
+        """Compare hardware against the UI for each connected output."""
+        for idx in sorted(self.connected_output_indices()):
+            try:
+                self._reapply_check_output(idx)
+            except Exception as exc:
+                self.log_debug(f"auto-reapply check FMT{idx} failed: {exc}")
+
+    def _reapply_check_output(self, idx):
+        reg = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        wanted = {}
+        for store, field in self.REAPPLY_FIELDS:
+            d = getattr(self, store, {}) or {}
+            var = d.get(idx)
+            if var is None:
+                continue
+            try:
+                wanted[field] = int(bool(var.get()))
+            except Exception:
+                continue
+        if not wanted:
+            return
+
+        current = self.read_umr_bitfields(reg, list(wanted.keys())) or {}
+        if not current:
+            return  # register unreadable right now (e.g. output asleep)
+
+        drifted = [f for f, want in wanted.items()
+                   if current.get(f) is not None and int(current[f]) != want]
+        if not drifted:
+            return
+
+        for field in drifted:
+            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
+                                  f"{reg}.{field}", str(wanted[field])])
+        connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx, f"FMT{idx}")
+        self.log_debug(f"auto-reapply: restored {', '.join(drifted)} on {connector}")
+        self.show_status(
+            f"Restored {len(drifted)} setting(s) on {connector}.", "info")
 
     def _pin_reapply_if_needed(self, idx, w):
         enc = w.get('active_encoder')
