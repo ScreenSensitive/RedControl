@@ -20484,6 +20484,7 @@ class RedControl:
                 # grants nothing beyond the verbs above.
                 argv = ['sudo'] + argv
 
+        console_print(f"DEBUG: helper {verb} {' '.join(str(a) for a in args)}")
         try:
             result = subprocess.run(argv, capture_output=True, text=True,
                                     timeout=timeout, errors='replace')
@@ -20494,6 +20495,9 @@ class RedControl:
             console_print(f"helper failed to start: {exc}")
             return None
 
+        console_print(f"DEBUG: helper {verb} -> rc={result.returncode} "
+                      f"out={(result.stdout or '').strip()[:80]!r} "
+                      f"err={(result.stderr or '').strip()[:80]!r}")
         if result.returncode == 0:
             # polkit's auth_admin_keep caches the authorisation for the rest of
             # the session, so background timers may now run without prompting.
@@ -20678,15 +20682,24 @@ class RedControl:
     def legacy_sudoers_present(self):
         """True if the pre-1.1 passwordless rule is still installed.
 
-        /etc/sudoers.d is not readable by normal users, so probe it the way
-        sudo would: the old rule permitted /usr/bin/true without a password.
+        /etc/sudoers.d is not readable by normal users, so ask sudo what it
+        would allow. Running `sudo -n /usr/bin/true` is not a valid probe: it
+        also succeeds whenever a sudo timestamp is still cached from an earlier
+        command, which made the warning reappear after the rule was long gone.
+        Look for the rule's own distinctive grant instead -- passwordless
+        /usr/bin/find, which is what made it dangerous.
         """
         try:
-            result = subprocess.run(['sudo', '-n', '/usr/bin/true'],
-                                    capture_output=True, timeout=1)
-            return result.returncode == 0
+            result = subprocess.run(['sudo', '-n', '-l'],
+                                    capture_output=True, text=True, timeout=2)
         except Exception:
             return False
+        if result.returncode != 0:
+            return False
+        for line in (result.stdout or '').splitlines():
+            if 'NOPASSWD' in line and '/usr/bin/find' in line:
+                return True
+        return False
 
     def offer_legacy_sudoers_removal(self):
         """Offer to remove the old grant. Called once at startup."""
@@ -24129,6 +24142,13 @@ sudo -n umr --version
         self.dp_widgets = {}  # DisplayPort Signal panel widgets by idx
         # Map ttk.Notebook tab ids -> output idx (FMT/pipe index used by our register dictionaries)
         self.tab_id_to_output_idx = {}
+
+        # Whatever path got us here (user switch, auto-detect fallback, rescan),
+        # the dropdown must end up on the GPU actually in use.
+        try:
+            self.sync_gpu_selector()
+        except Exception:
+            pass
 
         if len(self.active_outputs) == 0:
             console_print("DEBUG: No monitors - showing message")
