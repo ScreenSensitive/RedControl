@@ -20945,6 +20945,53 @@ class RedControl:
         console_print(f"DEBUG: Could not map instance {instance} to PCI, using generic detection")
         return self.get_gpu_name_from_pci()
 
+    # A pipe sitting at its power-on default differs from a configured one only
+    # in fields that are inert while their enable bit is clear, so "is this
+    # value the idle constant" cannot identify the live pipe. These are the
+    # enable bits; any of them set means the pipe is programmed.
+    FMT_ENABLE_BITS = (0, 8, 13, 14, 15, 16)  # truncate, spatial, frame, rgb, highpass, temporal
+
+    def read_all_fmt_pipes(self):
+        """{pipe index: raw register value} for every FMT block on this GPU.
+
+        Querying FMT_BIT_DEPTH_CONTROL without a pipe number makes umr return
+        the whole set in one call.
+        """
+        path = f"{self.asic_name}.{self.block_name}.FMT_BIT_DEPTH_CONTROL"
+        out = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path]) or ""
+        pipes = {}
+        for m in re.finditer(r"(?:mm|reg)FMT(\d+)_FMT_BIT_DEPTH_CONTROL\s*=>\s*(0x[0-9a-fA-F]+)",
+                             out):
+            try:
+                pipes[int(m.group(1))] = int(m.group(2), 0)
+            except ValueError:
+                continue
+        return pipes
+
+    def resolve_fmt_index(self, crtc_num):
+        """Which FMT pipe actually drives this CRTC.
+
+        Prefers the encoder's own DIG_SOURCE_SELECT. Falls back to the only
+        pipe with an enable bit set, and finally to the CRTC number.
+        """
+        try:
+            for enc in (self.detect_signal_encoders() or []):
+                if enc.get('source') is not None and enc.get('source') == crtc_num:
+                    return crtc_num
+        except Exception as exc:
+            self.log_debug(f"encoder probe failed: {exc}")
+
+        pipes = self.read_all_fmt_pipes()
+        if pipes:
+            programmed = [i for i, v in pipes.items()
+                          if any(v >> b & 1 for b in self.FMT_ENABLE_BITS)]
+            if crtc_num in programmed:
+                return crtc_num
+            if len(programmed) == 1:
+                self.log_debug(f"CRTC {crtc_num}: using programmed pipe FMT{programmed[0]}")
+                return programmed[0]
+        return crtc_num
+
     def detect_reg_prefix(self):
         """Work out whether this ASIC names registers mmFOO or regFOO.
 
@@ -24007,7 +24054,11 @@ sudo -n umr --version
             # Scan FMT registers and match to CRTC
             for crtc_num in sorted(crtc_to_connector.keys()):
                 connector = crtc_to_connector[crtc_num]
-                fmt_idx = crtc_num  # FMT index typically matches CRTC number
+                # "FMT index == CRTC number" is only a convention and it is
+                # wrong on real hardware: a display on CRTC 0 can be driven by
+                # FMT1, in which case every read and write lands on an empty
+                # pipe -- succeeding, changing nothing, reporting all-off.
+                fmt_idx = self.resolve_fmt_index(crtc_num)
 
                 path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{fmt_idx}_FMT_BIT_DEPTH_CONTROL"
                 output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
