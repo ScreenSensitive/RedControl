@@ -21088,21 +21088,12 @@ class RedControl:
             console_print(f"DEBUG: Calling scan_monitors() for GPU {index}")
             self.scan_monitors()
 
-            # A GPU with nothing plugged into it leaves an empty panel and no
-            # way to act, so fall back to the one that does drive outputs
-            # instead of stranding the user there.
-            if not self.active_outputs and previous_idx is not None \
-                    and previous_idx != index:
-                dead_name = self.gpu_name
-                self.select_gpu(previous_idx)
-                self.active_outputs = {}
-                self.initial_values = {}
-                for tab in self.notebook.tabs():
-                    self.notebook.forget(tab)
-                self.scan_monitors()
+            # A GPU with nothing attached stays selected and shows an empty
+            # state. Bouncing back to another GPU overrides a deliberate choice
+            # and makes the dropdown appear to ignore the click.
+            if not self.active_outputs:
                 self.show_status(
-                    f"{dead_name} has no connected outputs — switched back to "
-                    f"{self.gpu_name}.", "warn")
+                    f"{self.gpu_name} has no displays attached.", "info")
 
             # Keep the dropdown on whatever ended up selected.
             self.sync_gpu_selector()
@@ -24204,10 +24195,13 @@ sudo -n umr --version
         if len(self.active_outputs) == 0:
             console_print("DEBUG: No monitors - showing message")
             # Set the message text
+            gpu_label = getattr(self, 'gpu_name', None) or "This GPU"
             self.no_monitors_label.config(
-                text="⚠\n\nNo monitors connected to this GPU\n\n"
-                     "Select a different GPU from the dropdown above\n"
-                     "or connect a monitor and click 'Scan Monitors'"
+                text=f"No displays attached\n\n"
+                     f"{gpu_label} has no active display outputs, so there is "
+                     f"nothing to configure here.\n\n"
+                     f"Select a GPU that drives a display from the list above, "
+                     f"or attach a display and choose Rescan Monitors."
             )
             console_print("DEBUG: Message text set")
             # Clear sidebar monitor tiles when no monitors are present
