@@ -20919,9 +20919,27 @@ class RedControl:
         console_print(f"DEBUG: Could not map instance {instance} to PCI, using generic detection")
         return self.get_gpu_name_from_pci()
 
+    def sync_gpu_selector(self):
+        """Point the dropdown at the GPU actually in use.
+
+        Switching could leave the two disagreeing: an unsupported pick was
+        refused without moving the dropdown back, and a GPU with no outputs
+        left it showing a card whose panel had been abandoned.
+        """
+        idx = getattr(self, 'selected_gpu_idx', None)
+        if idx is None:
+            return
+        try:
+            values = list(self.gpu_selector.cget('values') or [])
+            if 0 <= idx < len(values) and self.gpu_selector_var.get() != values[idx]:
+                self.gpu_selector_var.set(values[idx])
+        except Exception:
+            pass
+
     def select_gpu(self, index):
         """Select GPU by index from available_gpus list"""
         if 0 <= index < len(self.available_gpus):
+            self.selected_gpu_idx = index
             gpu = self.available_gpus[index]
             self.gpu_instance = gpu['instance']
             self.asic_name = gpu['asic']
@@ -20942,7 +20960,9 @@ class RedControl:
         if 'intel' in selection_lower or 'nvidia' in selection_lower:
             console_print(f"DEBUG: Unsupported GPU detected: {selection}")
             self.show_unsupported_gpu_message(selection)
-            # Don't switch, keep current GPU selected
+            # Keep the current GPU, and put the dropdown back on it: leaving it
+            # showing the refused card made the two disagree.
+            self.sync_gpu_selector()
             return
 
         # Extract GPU index from "GPU 0: ..." format
@@ -20963,8 +20983,12 @@ class RedControl:
             # Rescan monitors for this GPU (will show button if monitors found)
             console_print(f"DEBUG: Calling scan_monitors() for GPU {index}")
             self.scan_monitors()
+            # scan_monitors may fall back to another GPU when this one drives
+            # no outputs; keep the dropdown on whatever ended up selected.
+            self.sync_gpu_selector()
         else:
             console_print(f"DEBUG: Could not parse GPU selection: {selection}")
+            self.sync_gpu_selector()
 
     def show_donate_menu(self):
         """Show dropdown menu with copy donation link option"""
@@ -26683,6 +26707,53 @@ sudo -n umr --version
     # on every connected monitor, comparing hardware against what the UI says
     # and rewriting only the fields that drifted.
 
+    def write_field_verified(self, idx, field, value, var_store=None,
+                             value_to_label=None, label=None):
+        """Write one FMT bitfield and confirm the register actually took it.
+
+        Returns True on success. On failure the bound control is set to what
+        the hardware really reports, so a switch or dropdown never displays a
+        value the GPU does not have -- a silent no-op (write refused, or the
+        driver undoing it) previously left the UI lying about the register.
+        """
+        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx, f"FMT{idx}")
+
+        wrote = self.run_umr_command(
+            ["-i", str(self.gpu_instance), "-wb", f"{path}.{field}", str(value)])
+        actual = None
+        if wrote is not None:
+            actual = (self.read_umr_bitfields(path, [field]) or {}).get(field)
+            if actual is not None and int(actual) == int(value):
+                return True
+            if actual is None:
+                return True  # cannot verify; assume the write stood
+
+        var = (getattr(self, var_store, {}) or {}).get(idx) if var_store else None
+        if var is not None:
+            try:
+                if value_to_label is not None and actual is not None:
+                    var.set(value_to_label(int(actual)))
+                elif actual is not None:
+                    var.set(int(actual))
+            except Exception:
+                pass
+        reason = "not authorised" if wrote is None else "the driver reset it immediately"
+        self.show_status(f"{label or field} did not take on {connector} — {reason}.",
+                         "error")
+        return False
+
+    # bitfield -> the dict of Tk variables mirroring it, so a write that did
+    # not take can put the switch back where the hardware actually is.
+    FIELD_TO_VAR = {
+        'FMT_SPATIAL_DITHER_EN': 'spatial_vars',
+        'FMT_TEMPORAL_DITHER_EN': 'temporal_vars',
+        'FMT_RGB_RANDOM_ENABLE': 'rgb_random_vars',
+        'FMT_HIGHPASS_RANDOM_ENABLE': 'highpass_random_vars',
+        'FMT_FRAME_RANDOM_ENABLE': 'frame_random_vars',
+        'FMT_TRUNCATE_EN': 'truncate_vars',
+    }
+
     REAPPLY_FIELDS = (
         ('spatial_vars', 'FMT_SPATIAL_DITHER_EN'),
         ('temporal_vars', 'FMT_TEMPORAL_DITHER_EN'),
@@ -26852,7 +26923,12 @@ sudo -n umr --version
 
         depth_val = self.DITHER_DEPTH_REVERSE.get(depth_str, 1)
         path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.FMT_SPATIAL_DITHER_DEPTH", str(depth_val)])
+        if not self.write_field_verified(
+                idx, "FMT_SPATIAL_DITHER_DEPTH", depth_val,
+                var_store='spatial_depth_vars',
+                value_to_label=lambda v: self.DITHER_DEPTH_MAP.get(v, "8-bit"),
+                label="Spatial dither depth"):
+            return
         self.status_var.set(f"Set spatial dither depth to {depth_str}")
         self.auto_save_current_monitor(idx)
 
@@ -26860,7 +26936,12 @@ sudo -n umr --version
         """Set spatial dither mode"""
         mode_val = int(mode_str.split()[-1])  # Extract number from "Mode X"
         path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.FMT_SPATIAL_DITHER_MODE", str(mode_val)])
+        if not self.write_field_verified(
+                idx, "FMT_SPATIAL_DITHER_MODE", mode_val,
+                var_store='spatial_mode_vars',
+                value_to_label=lambda v: f"Mode {v}",
+                label="Spatial dither mode"):
+            return
         self.status_var.set(f"Set spatial dither mode to {mode_str}")
         self.auto_save_current_monitor(idx)
 
@@ -26868,14 +26949,24 @@ sudo -n umr --version
         """Set temporal dither depth"""
         depth_val = self.DITHER_DEPTH_REVERSE.get(depth_str, 1)
         path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.FMT_TEMPORAL_DITHER_DEPTH", str(depth_val)])
+        if not self.write_field_verified(
+                idx, "FMT_TEMPORAL_DITHER_DEPTH", depth_val,
+                var_store='temporal_depth_vars',
+                value_to_label=lambda v: self.DITHER_DEPTH_MAP.get(v, "8-bit"),
+                label="Temporal dither depth"):
+            return
         self.status_var.set(f"Set temporal dither depth to {depth_str}")
         self.auto_save_current_monitor(idx)
 
     def set_temporal_offset(self, idx, offset_val):
         """Set temporal dither offset"""
         path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.FMT_TEMPORAL_DITHER_OFFSET", str(offset_val)])
+        if not self.write_field_verified(
+                idx, "FMT_TEMPORAL_DITHER_OFFSET", offset_val,
+                var_store='temporal_offset_vars',
+                value_to_label=lambda v: str(v),
+                label="Temporal dither offset"):
+            return
         self.status_var.set(f"Set temporal dither offset to {offset_val}")
         self.auto_save_current_monitor(idx)
 
@@ -26891,7 +26982,34 @@ sudo -n umr --version
         after_str = 'ON' if value else 'OFF'
 
         # Run command
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.{bitfield}", str(val)])
+        wrote = self.run_umr_command(
+            ["-i", str(self.gpu_instance), "-wb", f"{path}.{bitfield}", str(val)])
+
+        # Read the field back. A failed write returns None and used to be
+        # ignored, so the switch moved while the hardware did not -- and the
+        # driver can also reject or immediately undo a write. Either way the
+        # UI must not claim a state the register does not have.
+        actual = None
+        if wrote is not None:
+            check = self.read_umr_bitfields(path, [bitfield]) or {}
+            actual = check.get(bitfield)
+
+        if wrote is None or (actual is not None and int(actual) != val):
+            var = (getattr(self, self.FIELD_TO_VAR.get(bitfield, ''), {}) or {}).get(idx)
+            if var is not None:
+                try:
+                    var.set(bool(actual) if actual is not None else (not value))
+                except Exception:
+                    pass
+            reason = ("not authorised" if wrote is None
+                      else "the driver reset it immediately")
+            self.show_status(f"{bitfield} did not take on {connector_name} "
+                             f"— {reason}.", "error")
+            self.log_command(f"{connector_name}: {bitfield}", before_str,
+                             f"umr -wb {path}.{bitfield} {val}",
+                             "FAILED", success=False)
+            return
+
         self.status_var.set(f"Set {bitfield} = {val}")
 
         # Log to debug console
@@ -26933,7 +27051,13 @@ sudo -n umr --version
         before_value = before_str.get() if before_str else "Unknown"
 
         # Run command
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.FMT_TRUNCATE_DEPTH", str(depth_val)])
+        if not self.write_field_verified(
+                idx, "FMT_TRUNCATE_DEPTH", depth_val,
+                var_store='truncate_depth_vars',
+                value_to_label=lambda v: self.TRUNCATE_DEPTH_MAP.get(v, str(v))
+                if hasattr(self, 'TRUNCATE_DEPTH_MAP') else str(v),
+                label="Truncate depth"):
+            return
         self.status_var.set(f"Set truncate depth to {depth_str}")
 
         # Log to debug console
@@ -26957,7 +27081,12 @@ sudo -n umr --version
         before_value = before_str.get() if before_str else "Unknown"
 
         # Run command
-        self.run_umr_command(["-i", str(self.gpu_instance), "-wb", f"{path}.FMT_TRUNCATE_MODE", str(mode_val)])
+        if not self.write_field_verified(
+                idx, "FMT_TRUNCATE_MODE", mode_val,
+                var_store='truncate_mode_vars',
+                value_to_label=lambda v: str(v),
+                label="Truncate mode"):
+            return
         self.status_var.set(f"Set truncate mode to {mode_str}")
 
         # Log to debug console
