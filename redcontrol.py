@@ -18,6 +18,7 @@ import shutil
 import base64
 import io
 import types
+import tempfile
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -19796,6 +19797,13 @@ class RedControl:
         # Passwordless access is gone: privileged work goes through
         # redcontrol-helper under polkit. The only entry left is a way to clear
         # the insecure rule older versions installed.
+        autostart_menu.add_separator()
+        autostart_menu.add_command(
+            label=("Ask for authentication each login"
+                   if self.polkit_rule_installed()
+                   else "Never ask for authentication on this machine"),
+            command=self.toggle_polkit_rule)
+
         if self.legacy_sudoers_present():
             autostart_menu.add_separator()
             autostart_menu.add_command(label="Remove Old Passwordless Rule (insecure)",
@@ -20133,6 +20141,13 @@ class RedControl:
             except Exception:
                 pass
             self.show_active_section()
+            # Values were previously only read when the tab was built, so a tab
+            # could show settings the driver had since reset (mode change, DPMS,
+            # resume). Re-read the newly selected output from hardware.
+            try:
+                self.root.after_idle(self.sync_current_tab_from_hw)
+            except Exception:
+                pass
 
         self.notebook.bind('<<NotebookTabChanged>>', _on_tab_change)
 
@@ -20522,6 +20537,102 @@ class RedControl:
             "redcontrol-helper is not installed, so RedControl cannot reach "
             "the GPU.\n\n"
             "Run ./install.sh from the RedControl directory to install it.")
+
+    # ---- optional: stop prompting once per login ----------------------------
+    # polkit's auth_admin_keep asks once per session. A polkit rule can drop
+    # that to never. Unlike the sudoers grant this replaced, it authorises a
+    # single action -- the helper, which accepts eight verbs and refuses any
+    # register outside the FMT_* allowlist -- rather than a general-purpose
+    # binary, and it is confined to a local, active session.
+
+    POLKIT_RULE = '/etc/polkit-1/rules.d/49-redcontrol.rules'
+
+    def polkit_rule_installed(self):
+        return os.path.exists(self.POLKIT_RULE)
+
+    def polkit_rule_text(self):
+        return (
+            '// Installed by RedControl at the user\'s request.\n'
+            '// Removes the once-per-session authentication prompt for the\n'
+            '// RedControl helper only. Delete this file to restore prompting.\n'
+            'polkit.addRule(function(action, subject) {\n'
+            '    if (action.id == "org.redcontrol.helper" &&\n'
+            '        subject.isInGroup("%s") &&\n'
+            '        subject.local && subject.active) {\n'
+            '        return polkit.Result.YES;\n'
+            '    }\n'
+            '});\n' % self.admin_group())
+
+    @staticmethod
+    def admin_group():
+        """Group polkit treats as administrators on this distro."""
+        import grp
+        for name in ('wheel', 'sudo', 'admin'):
+            try:
+                if grp.getgrnam(name).gr_mem or name == 'wheel':
+                    return name
+            except KeyError:
+                continue
+        return 'wheel'
+
+    def toggle_polkit_rule(self):
+        if self.polkit_rule_installed():
+            if not messagebox.askyesno(
+                    "Restore authentication prompt",
+                    "RedControl will ask for authentication once per login "
+                    "session again.\n\nRemove the rule?"):
+                return
+            argv = (['pkexec'] if shutil.which('pkexec') else ['sudo'])
+            argv += ['rm', '-f', self.POLKIT_RULE]
+            rc = subprocess.run(argv, capture_output=True, text=True).returncode
+            if rc == 0:
+                messagebox.showinfo("Done", "Authentication prompt restored.")
+                self.refresh_menubar()
+            else:
+                messagebox.showerror("Error", "Could not remove the rule.")
+            return
+
+        if not messagebox.askyesno(
+                "Never ask on this machine",
+                "RedControl will stop asking for authentication on this "
+                "machine.\n\n"
+                "This grants passwordless access to the RedControl helper "
+                "only, for members of the '%s' group in a local, active "
+                "session. The helper accepts a fixed set of GPU operations "
+                "and refuses anything else, so it cannot be used to gain a "
+                "root shell.\n\n"
+                "It does not grant passwordless sudo. Undo it any time from "
+                "this menu.\n\nContinue?" % self.admin_group()):
+            return
+
+        tmp = os.path.join(tempfile.mkdtemp(prefix='redcontrol-'), 'rule')
+        try:
+            with open(tmp, 'w') as fh:
+                fh.write(self.polkit_rule_text())
+            argv = (['pkexec'] if shutil.which('pkexec') else ['sudo'])
+            argv += ['install', '-m', '0644', '-o', 'root', '-g', 'root',
+                     tmp, self.POLKIT_RULE]
+            result = subprocess.run(argv, capture_output=True, text=True)
+        except OSError as exc:
+            messagebox.showerror("Error", f"Could not write the rule:\n{exc}")
+            return
+        finally:
+            try:
+                shutil.rmtree(os.path.dirname(tmp), ignore_errors=True)
+            except Exception:
+                pass
+
+        if result.returncode == 0:
+            messagebox.showinfo(
+                "Done",
+                "RedControl will no longer ask for authentication on this "
+                "machine.")
+            self.refresh_menubar()
+        else:
+            messagebox.showerror(
+                "Error",
+                "Could not install the rule.\n\n%s" % (result.stderr.strip() or
+                                                       "pkexec was dismissed."))
 
     # ---- migration away from the old sudoers grant --------------------------
 
@@ -22118,6 +22229,26 @@ class RedControl:
         canvas.bind("<B1-Motion>", lambda e: canvas.scan_dragto(e.x, e.y, gain=1))
         return inner
 
+    def sync_current_tab_from_hw(self):
+        """Re-read the visible monitor's registers into its controls.
+
+        Only runs once the helper has been authorised this session, so merely
+        clicking between tabs cannot raise an authentication dialog.
+        """
+        if os.geteuid() != 0 and not getattr(self, '_helper_authorized', False):
+            return
+        idx = self.get_current_output_idx()
+        if idx is None:
+            return
+        try:
+            self.sync_fmt_ui_from_hw(idx)
+        except Exception as exc:
+            self.log_debug(f"sync_fmt_ui_from_hw({idx}) failed: {exc}")
+        try:
+            self.refresh_status(idx)
+        except Exception as exc:
+            self.log_debug(f"refresh_status({idx}) failed: {exc}")
+
     def show_active_section(self):
         """Show the active section page for the currently selected monitor tab."""
         if not hasattr(self, "monitor_section_frames"):
@@ -22190,6 +22321,8 @@ class RedControl:
         fg_inactive = t.get('fg_muted', '#777777')
         fg_empty = t.get('border', '#999999')
         bg = t.get('bg_sidebar', '#ffffff')
+        accent = t.get('accent', fg_active)
+        accent_fg = t.get('btn_fg', '#ffffff')
 
         try:
             current = self.notebook.index('current')
@@ -22221,18 +22354,28 @@ class RedControl:
 
                 if i < len(labels):
                     active = (i == current)
-                    col = fg_active  # Always use active color for cleaner look
+                    # The selected tile is filled with the accent colour and its
+                    # text inverted; unselected tiles stay outline-only in the
+                    # muted colour. A colour-only difference was too subtle to
+                    # read at a glance -- previously there was none at all.
+                    col = fg_active if active else fg_inactive
+                    screen_fill = accent if active else bg
+                    text_col = accent_fg if active else fg_inactive
+                    outline_col = accent if active else fg_inactive
 
                     # Monitor outline + stand
-                    canvas.create_rectangle(12, 12, 148, 88, outline=col, width=4)
-                    canvas.create_rectangle(70, 90, 90, 100, outline=col, width=3)
-                    canvas.create_line(55, 100, 105, 100, fill=col, width=3)
+                    canvas.create_rectangle(12, 12, 148, 88, outline=outline_col,
+                                            fill=screen_fill, width=4)
+                    canvas.create_rectangle(70, 90, 90, 100, outline=outline_col, width=3)
+                    canvas.create_line(55, 100, 105, 100, fill=outline_col, width=3)
 
                     lbl = _shorten(labels[i], 14)
                     # Monitor number label (small, above connector name)
-                    canvas.create_text(80, 28, text=f"Monitor {i+1}", fill=col, font=('Arial', 8), justify='center')
+                    canvas.create_text(80, 28, text=f"Monitor {i+1}", fill=text_col,
+                                       font=('Arial', 8), justify='center')
                     # Connector name (main label)
-                    canvas.create_text(80, 55, text=lbl, fill=col, font=('Arial', 11, 'bold'), width=130, justify='center')
+                    canvas.create_text(80, 55, text=lbl, fill=text_col,
+                                       font=('Arial', 11, 'bold'), width=130, justify='center')
                 else:
                     # Empty slot
                     canvas.create_rectangle(12, 12, 148, 88, outline=fg_empty, width=2, dash=(4, 3))
@@ -22437,6 +22580,13 @@ Restart this tool to detect UMR automatically.
             autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
         else:
             autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
+
+        autostart_menu.add_separator()
+        autostart_menu.add_command(
+            label=("Ask for authentication each login"
+                   if self.polkit_rule_installed()
+                   else "Never ask for authentication on this machine"),
+            command=self.toggle_polkit_rule)
 
         if self.legacy_sudoers_present():
             autostart_menu.add_separator()
