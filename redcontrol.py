@@ -21092,9 +21092,23 @@ class RedControl:
 
         depths = {0: "6-bit", 1: "8-bit", 2: "10-bit", 3: "12-bit"}
 
-        def field(v, lo, hi=None):
-            hi = lo if hi is None else hi
-            return (v >> lo) & ((1 << (hi - lo + 1)) - 1)
+        # Decode by field NAME from umr rather than by hardcoded bit position.
+        # Bit layouts are DCN-specific; field names have been stable, so this
+        # keeps the report honest on hardware neither of us has.
+        FEATURES = [
+            ("truncation", "FMT_TRUNCATE_EN",
+             lambda b: f"depth {depths.get(b.get('FMT_TRUNCATE_DEPTH', 0), '?')}, "
+                       f"mode {'round' if b.get('FMT_TRUNCATE_MODE') else 'truncate'}"),
+            ("spatial dither", "FMT_SPATIAL_DITHER_EN",
+             lambda b: f"depth {depths.get(b.get('FMT_SPATIAL_DITHER_DEPTH', 0), '?')}, "
+                       f"mode {b.get('FMT_SPATIAL_DITHER_MODE', 0)}"),
+            ("temporal dither", "FMT_TEMPORAL_DITHER_EN",
+             lambda b: f"depth {depths.get(b.get('FMT_TEMPORAL_DITHER_DEPTH', 0), '?')}, "
+                       f"offset {b.get('FMT_TEMPORAL_DITHER_OFFSET', 0)}"),
+            ("frame random", "FMT_FRAME_RANDOM_ENABLE", None),
+            ("rgb noise", "FMT_RGB_RANDOM_ENABLE", None),
+            ("highpass random", "FMT_HIGHPASS_RANDOM_ENABLE", None),
+        ]
 
         def state(on, detail=""):
             # Depth/mode selectors keep their value while a feature is off, so
@@ -21108,33 +21122,38 @@ class RedControl:
         for idx in sorted(pipes):
             v = pipes[idx]
             conn = pipe_conn.get(idx)
-            programmed = any(v >> b & 1 for b in self.FMT_ENABLE_BITS)
-            # Idle, unattached pipes are noise. A pipe that is programmed but
-            # has no connector is kept: that combination is exactly what a
-            # wrong pipe-to-monitor mapping looks like, and hiding it would
-            # hide the evidence.
+            bits = self.read_umr_bitfields(
+                f"{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL",
+                [f for _, f, _ in FEATURES] +
+                ["FMT_TRUNCATE_DEPTH", "FMT_TRUNCATE_MODE",
+                 "FMT_SPATIAL_DITHER_DEPTH", "FMT_SPATIAL_DITHER_MODE",
+                 "FMT_TEMPORAL_DITHER_DEPTH", "FMT_TEMPORAL_DITHER_OFFSET"])
+            if bits is None:
+                add("")
+                add(f"  FMT{idx}  —  FAILED to decode      raw 0x{v:08X}")
+                add("      The register read back but none of the expected field")
+                add("      names were present. This display block may use a")
+                add("      different layout; please include this report in an issue.")
+                continue
+
+            programmed = any(bits.get(f) for _, f, _ in FEATURES)
             if not conn and not programmed:
                 hidden += 1
                 continue
             label = conn if conn else "programmed but not mapped to a display"
             add("")
             add(f"  FMT{idx}  —  {label}      raw 0x{v:08X}")
-            add(f"      truncation        "
-                f"{state(field(v, 0), f'depth {depths[field(v, 4, 5)]}, mode ' + ('round' if field(v, 1) else 'truncate'))}")
-            add(f"      spatial dither    "
-                f"{state(field(v, 8), f'depth {depths[field(v, 11, 12)]}, mode {field(v, 9, 10)}')}")
-            add(f"      temporal dither   "
-                f"{state(field(v, 16), f'depth {depths[field(v, 17, 18)]}, offset {field(v, 21, 22)}')}")
-            add(f"      frame random      {state(field(v, 13))}")
-            add(f"      rgb noise         {state(field(v, 14))}")
-            add(f"      highpass random   {state(field(v, 15))}")
+            for name, field, detail_fn in FEATURES:
+                on = bool(bits.get(field))
+                detail = detail_fn(bits) if detail_fn else ""
+                add(f"      {name:<17} {state(on, detail)}")
             if conn:
                 add(f"      => {'dithering is active on this display' if programmed else 'clean output, no dithering'}")
             else:
                 add("      => WARNING: this pipe is configured but no display is "
                     "mapped to it.")
-                add("         If your display looks wrong, set the pipe override "
-                    "below to this index.")
+                add("         If your display looks wrong, this is probably the "
+                    "pipe it should be using.")
         if hidden:
             add("")
             add(f"  ({hidden} idle pipe{'s' if hidden != 1 else ''} with no display hidden)")
@@ -21197,14 +21216,23 @@ class RedControl:
                       font=('SF Pro Text', 9, 'bold')).pack(side=side, padx=(8, 0))
 
         def copy_report():
+            # Fenced so it survives GitHub's markdown, with the report's own
+            # context attached -- a bare paste loses the version and the URL.
+            body = ("**RedControl diagnostics**\n\n"
+                    "```\n" + self.build_diagnostics_text() + "\n```\n")
             self.root.clipboard_clear()
-            self.root.clipboard_append(self.build_diagnostics_text())
-            self.show_status("Diagnostics copied to clipboard.", "info")
+            self.root.clipboard_append(body)
+            self.show_status("Diagnostics copied — paste into a new issue at "
+                             "github.com/ScreenSensitive/RedControl/issues",
+                             "info")
 
         btn("Close", win.destroy)
         btn("Copy", copy_report)
         btn("Refresh", refresh)
-        tk.Label(row, text="Paste this into a bug report.", bg=self.bg,
+        tk.Label(row,
+                 text=("Copy, then open an issue at "
+                       "github.com/ScreenSensitive/RedControl/issues and paste."),
+                 bg=self.bg,
                  fg=self.theme.get('fg_muted', self.fg),
                  font=('SF Pro Text', 9)).pack(side='left')
 
