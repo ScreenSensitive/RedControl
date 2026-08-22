@@ -19781,8 +19781,14 @@ class RedControl:
         autostart_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Auto-Start", menu=autostart_menu)
 
-        autostart_enabled = self.is_autostart_enabled()
-        if autostart_enabled:
+        autostart_enabled, points_here, _ = self.autostart_state()
+        if autostart_enabled and not points_here:
+            # The entry exists but launches a different copy of RedControl, so
+            # "Disable" would misrepresent what is actually set to run.
+            autostart_menu.add_command(label="Auto-Start: runs another copy — point it here",
+                                       command=self.enable_autostart_and_refresh)
+            autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
+        elif autostart_enabled:
             autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
         else:
             autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
@@ -22347,20 +22353,47 @@ Restart this tool to detect UMR automatically.
             except Exception:
                 messagebox.showinfo("URL", f"Please visit:\n{url}")
 
-    def check_autostart_enabled(self):
-        """Check if autostart is enabled"""
-        # Check systemd user service
-        systemd_path = Path.home() / '.config' / 'systemd' / 'user' / 'redcontrol.service'
-        # Check XDG autostart
-        xdg_path = Path.home() / '.config' / 'autostart' / 'redcontrol.desktop'
+    def autostart_state(self):
+        """Inspect the XDG autostart entry.
 
-        return systemd_path.exists() or xdg_path.exists()
+        Returns (enabled, points_here, exec_line). Mere existence of the file
+        is not enough to call autostart enabled: desktop environments --
+        Cinnamon's Startup Applications among them -- disable an entry by
+        setting Hidden=true or X-GNOME-Autostart-enabled=false rather than
+        deleting it. The entry may also launch a different copy of RedControl,
+        in which case reporting a plain "enabled" is misleading.
+        """
+        xdg_path = Path.home() / '.config' / 'autostart' / 'redcontrol.desktop'
+        systemd_path = (Path.home() / '.config' / 'systemd' / 'user'
+                        / 'redcontrol.service')
+
+        if not xdg_path.exists():
+            return (systemd_path.exists(), True, None)
+
+        enabled, exec_line = True, None
+        try:
+            for raw in xdg_path.read_text(errors='replace').splitlines():
+                key, sep, val = raw.partition('=')
+                if not sep:
+                    continue
+                key, val = key.strip().lower(), val.strip()
+                if key == 'hidden' and val.lower() == 'true':
+                    enabled = False
+                elif key == 'x-gnome-autostart-enabled' and val.lower() == 'false':
+                    enabled = False
+                elif key == 'exec':
+                    exec_line = val
+        except OSError:
+            return (True, True, None)
+
+        here = os.path.abspath(__file__)
+        points_here = bool(exec_line) and here in exec_line
+        return (enabled, points_here, exec_line)
 
     def is_autostart_enabled(self):
-        """Check if autostart is currently enabled"""
-        xdg_path = Path.home() / '.config' / 'autostart' / 'redcontrol.desktop'
-        systemd_path = Path.home() / '.config' / 'systemd' / 'user' / 'redcontrol.service'
-        return xdg_path.exists() or systemd_path.exists()
+        """True if RedControl is set to start at login."""
+        enabled, _, _ = self.autostart_state()
+        return enabled
 
     def enable_autostart_and_refresh(self):
         """Enable autostart and refresh menu"""
@@ -22390,9 +22423,13 @@ Restart this tool to detect UMR automatically.
         menubar.add_cascade(label="Auto-Start", menu=autostart_menu)
 
         # Auto-Start section
-        autostart_enabled = self.is_autostart_enabled()
+        autostart_enabled, points_here, _ = self.autostart_state()
 
-        if autostart_enabled:
+        if autostart_enabled and not points_here:
+            autostart_menu.add_command(label="Auto-Start: runs another copy — point it here",
+                                       command=self.enable_autostart_and_refresh)
+            autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
+        elif autostart_enabled:
             autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
         else:
             autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
