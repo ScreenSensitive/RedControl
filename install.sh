@@ -34,15 +34,32 @@ say "Detected: ${DISTRO} (${PM:-no known package manager})"
 head "1. Python & Tkinter"
 if command -v python3 >/dev/null 2>&1; then ok "python3: $(python3 --version 2>&1)"
 else err "python3 not found — install Python 3 first."; exit 1; fi
-if python3 -c "import tkinter" 2>/dev/null; then ok "tkinter present"
+have_tk() { python3 -c "import tkinter" 2>/dev/null; }
+if have_tk; then ok "tkinter present"
 else
   warn "tkinter (python3-tk) is missing — the GUI needs it."
   case "$PM" in
-    pacman) say "  Install with: sudo pacman -S tk" ;;
-    apt)    say "  Install with: sudo apt install python3-tk" ;;
-    dnf)    say "  Install with: sudo dnf install python3-tkinter" ;;
-    *)      say "  Install your distro's python3-tk / tk package." ;;
+    pacman) TK_PKG="tk" ;;
+    apt)    TK_PKG="python3-tk" ;;
+    dnf)    TK_PKG="python3-tkinter" ;;
+    *)      TK_PKG="" ;;
   esac
+  if [ -n "$TK_PKG" ] && ask "Install $TK_PKG now?"; then
+    case "$PM" in
+      pacman) sudo pacman -S --needed "$TK_PKG" ;;
+      apt)    sudo apt update && sudo apt install -y "$TK_PKG" ;;
+      dnf)    sudo dnf install -y "$TK_PKG" ;;
+    esac
+  else
+    case "$PM" in
+      pacman) say "  Install with: sudo pacman -S tk" ;;
+      apt)    say "  Install with: sudo apt install python3-tk" ;;
+      dnf)    say "  Install with: sudo dnf install python3-tkinter" ;;
+      *)      say "  Install your distro's python3-tk / tk package." ;;
+    esac
+  fi
+  if have_tk; then ok "tkinter present"
+  else err "tkinter still missing — RedControl cannot start without it."; fi
 fi
 
 # ---- 2. umr (the core dependency) -------------------------------------------
@@ -65,21 +82,34 @@ else
       ;;
     apt|dnf)
       say "umr isn't in most $PM repos, so it's built from source (a few minutes)."
+      say "RedControl only needs umr's register CLI, so the build skips the GUI and"
+      say "LLVM disassembler (-DUMR_NO_GUI=ON -DUMR_NO_LLVM=ON) — far fewer dependencies."
       if ask "Install build tools and compile umr now?"; then
-        set -e
+        deps_ok=1
         if [ "$PM" = apt ]; then
-          sudo apt update
-          sudo apt install -y git cmake pkg-config libpciaccess-dev libdrm-dev \
-               libncurses-dev libjson-c-dev bison flex
+          sudo apt update \
+            && sudo apt install -y git cmake build-essential pkg-config \
+                 libpciaccess-dev libdrm-dev libncurses-dev \
+            || deps_ok=0
         else
-          sudo dnf install -y git cmake pkgconf-pkg-config libpciaccess-devel libdrm-devel \
-               ncurses-devel json-c-devel bison flex
+          sudo dnf install -y git cmake gcc gcc-c++ make pkgconf-pkg-config \
+               libpciaccess-devel libdrm-devel ncurses-devel \
+            || deps_ok=0
         fi
-        tmp="$(mktemp -d)"; git clone --depth 1 https://gitlab.freedesktop.org/tomstdenis/umr "$tmp/umr"
-        cmake -S "$tmp/umr" -B "$tmp/umr/build"; make -C "$tmp/umr/build" -j"$(nproc)"
-        sudo make -C "$tmp/umr/build" install; rm -rf "$tmp"
-        set +e
-        command -v umr >/dev/null 2>&1 && ok "umr installed" || err "Build finished but umr not on PATH."
+        if [ "$deps_ok" -eq 0 ]; then
+          err "Package install failed — fix the errors above and re-run this script."
+        else
+          tmp="$(mktemp -d)"
+          if git clone --depth 1 https://gitlab.freedesktop.org/tomstdenis/umr "$tmp/umr" \
+             && cmake -S "$tmp/umr" -B "$tmp/umr/build" -DUMR_NO_GUI=ON -DUMR_NO_LLVM=ON \
+             && make -C "$tmp/umr/build" -j"$(nproc)" \
+             && sudo make -C "$tmp/umr/build" install; then
+            ok "umr installed"
+          else
+            err "umr build failed — see the error above, or try the manual steps below."
+          fi
+          rm -rf "$tmp"
+        fi
       fi
       ;;
     *)
@@ -88,17 +118,30 @@ else
   esac
   if ! command -v umr >/dev/null 2>&1; then
     say ""
-    say "${B}Manual umr install:${N}"
+    say "${B}Manual umr install (minimal build — all RedControl needs):${N}"
+    say "  # Debian/Ubuntu/Mint:"
+    say "  sudo apt install git cmake build-essential pkg-config libpciaccess-dev libdrm-dev libncurses-dev"
+    say "  # Fedora:"
+    say "  sudo dnf install git cmake gcc gcc-c++ make pkgconf-pkg-config libpciaccess-devel libdrm-devel ncurses-devel"
+    say "  # Arch (or just: yay -S umr-git):"
+    say "  sudo pacman -S --needed git base-devel cmake libpciaccess libdrm ncurses"
+    say "  # then:"
     say "  git clone https://gitlab.freedesktop.org/tomstdenis/umr"
-    say "  cd umr && cmake -S . -B build && make -C build -j && sudo make -C build install"
+    say "  cd umr && cmake -S . -B build -DUMR_NO_GUI=ON -DUMR_NO_LLVM=ON && make -C build -j && sudo make -C build install"
   fi
 fi
 
 # ---- 3. Optional niceties ---------------------------------------------------
 head "3. Optional extras (nicer names, tray icon)"
 if ask "Install optional Python extras (pystray, pillow) for the tray icon?"; then
-  python3 -m pip install --user --upgrade pystray pillow 2>/dev/null && ok "extras installed" \
-    || warn "pip install skipped/failed — the app still runs without the tray."
+  # Newer distros (PEP 668, e.g. Ubuntu 24.04 / Mint 22) refuse plain pip installs;
+  # --break-system-packages with --user only touches ~/.local, so it's a safe fallback.
+  if python3 -m pip install --user --upgrade pystray pillow \
+     || python3 -m pip install --user --upgrade --break-system-packages pystray pillow; then
+    ok "extras installed"
+  else
+    warn "pip install failed — the app still runs without the tray."
+  fi
 fi
 
 # ---- 4. Desktop launcher + icon ---------------------------------------------
@@ -124,4 +167,7 @@ ok "Launcher installed — search 'RedControl' in your app menu."
 head "Done"
 if command -v umr >/dev/null 2>&1; then ok "All set."; else warn "Install umr (above) before RedControl can control the GPU."; fi
 say "Run now with:  python3 \"$HERE/redcontrol.py\""
-if ask "Launch RedControl now?"; then setsid python3 "$HERE/redcontrol.py" >/dev/null 2>&1 & fi
+if ask "Launch RedControl now?"; then
+  if have_tk; then setsid python3 "$HERE/redcontrol.py" >/dev/null 2>&1 &
+  else err "Cannot launch — tkinter is not installed (see step 1)."; fi
+fi
