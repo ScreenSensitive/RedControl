@@ -20424,6 +20424,12 @@ class RedControl:
             self.report_helper_missing()
             return None
 
+        # If the user just dismissed an auth dialog, stop asking for a bit.
+        # Several detection paths retry on empty output, and without this a
+        # single cancelled prompt turns into a burst of them.
+        if time.time() < getattr(self, '_helper_denied_until', 0):
+            return None
+
         argv = [helper, verb] + [str(a) for a in args]
         if os.geteuid() != 0:
             if shutil.which('pkexec'):
@@ -20451,6 +20457,7 @@ class RedControl:
             return result.stdout
         if result.returncode in (126, 127):
             # pkexec: dismissed dialog, or not authorised.
+            self._helper_denied_until = time.time() + 30
             console_print("authorisation dismissed or denied")
             return None
         console_print(f"helper {verb} failed (rc={result.returncode}): "
@@ -21227,22 +21234,19 @@ class RedControl:
                                 console_print(f"✓ Found colorspace for {connector_name} (FMT{monitor_index}/crtc-{monitor_index}): {colorspace}")
                                 return colorspace
                     except PermissionError:
-                        # Try with sudo if direct read fails
-                        console_print(f"  Direct read failed (permission denied), trying sudo...")
+                        # debugfs is root-only; go through the helper
+                        console_print(f"  Direct read failed (permission denied), trying helper...")
                         try:
-                            # First try passwordless sudo
+                            # Read through the privileged helper
                             result = self._debugfs_result(path)
                             if result.returncode == 0 and result.stdout.strip():
                                 colorspace = result.stdout.strip()
                                 console_print(f"Found colorspace for {connector_name} (FMT{monitor_index}/crtc-{monitor_index}): {colorspace}")
                                 return colorspace
                             else:
-                                # Passwordless failed, try regular sudo (will prompt in terminal)
-                                console_print(f"  Passwordless not enabled, trying regular sudo...")
-                                console_print(f"  >>> Password prompt will appear in your TERMINAL window! <<<")
-                                # Let stdin go to terminal so password prompt works, but suppress stderr to avoid noise
+                                # Retry once: the helper may have been
+                                # authorised on the previous call.
                                 stdout, _ = (self.read_debugfs(path) or ''), None
-                                # Check returncode AFTER communicate()
                                 if stdout and stdout.strip():
                                     colorspace = stdout.strip()
                                     console_print(f"Found colorspace for {connector_name} (FMT{monitor_index}/crtc-{monitor_index}): {colorspace}")
@@ -21293,14 +21297,14 @@ class RedControl:
                                             except PermissionError:
                                                 # Try with sudo if direct read fails
                                                 try:
-                                                    # First try passwordless sudo
+                                                    # Read through the privileged helper
                                                     result = self._debugfs_result(crtc_path)
                                                     if result.returncode == 0 and result.stdout.strip():
                                                         colorspace = result.stdout.strip()
                                                         console_print(f"Found colorspace for {connector_name}: {colorspace} at {crtc_path}")
                                                         return colorspace
                                                     else:
-                                                        # Passwordless failed, try regular sudo
+                                                        # Retry once via the helper
                                                         stdout, _ = (self.read_debugfs(crtc_path) or ''), None
                                                         if stdout and stdout.strip():
                                                             colorspace = stdout.strip()
@@ -21327,14 +21331,14 @@ class RedControl:
                 except PermissionError:
                     # Try with sudo if direct read fails
                     try:
-                        # First try passwordless sudo
+                        # Read through the privileged helper
                         result = self._debugfs_result(path)
                         if result.returncode == 0 and result.stdout.strip():
                             colorspace = result.stdout.strip()
                             console_print(f"Found colorspace (fallback): {colorspace} at {path}")
                             return colorspace
                         else:
-                            # Passwordless failed, try regular sudo
+                            # Retry once via the helper
                             stdout, _ = (self.read_debugfs(path) or ''), None
                             if stdout and stdout.strip():
                                 colorspace = stdout.strip()
@@ -21388,7 +21392,7 @@ class RedControl:
                                                             console_print(f"Found colorspace for {connector_name}: {colorspace} at {crtc_path}")
                                                             return colorspace
                                                 except PermissionError:
-                                                    # Try with sudo -n (only works if passwordless enabled)
+                                                    # Read through the privileged helper
                                                     result = self._debugfs_result(crtc_path)
                                                     if result.returncode == 0:
                                                         colorspace = result.stdout.strip()
@@ -21413,7 +21417,7 @@ class RedControl:
                                 console_print(f"Found colorspace (fallback): {colorspace} at {path}")
                                 return colorspace
                     except PermissionError:
-                        # Try with sudo -n (only works if passwordless enabled)
+                        # Read through the privileged helper
                         result = self._debugfs_result(path)
                         if result.returncode == 0:
                             colorspace = result.stdout.strip()
@@ -21426,9 +21430,9 @@ class RedControl:
 
             console_print("=== All methods failed, returning None ===")
             console_print("TROUBLESHOOTING:")
-            console_print("1. Check if passwordless is enabled: sudo -k && sudo -n /usr/bin/true")
-            console_print("2. Check if cat is in sudoers: sudo cat /etc/sudoers.d/umr-passwordless | grep cat")
-            console_print("3. Test sudo cat: sudo -n cat /sys/kernel/debug/dri/0/crtc-0/amdgpu_current_colorspace")
+            console_print("1. Is the helper installed?  ls -l /usr/libexec/redcontrol-helper")
+            console_print("2. Is polkit present?         command -v pkexec")
+            console_print("3. Test a read directly:      pkexec /usr/libexec/redcontrol-helper list-debugfs")
             return None
 
         except Exception as e:
@@ -23194,10 +23198,11 @@ sudo -n umr --version
             self.gpu_info_label.config(text="ERROR: UMR not found or no permission")
             self.status_var.set("GPU detection failed - check UMR installation")
             messagebox.showerror("Detection Failed",
-                "Could not run UMR. Make sure:\n"
-                "1. UMR is installed\n"
-                "2. Running with sudo/root\n"
-                "3. AMD GPU drivers loaded")
+                "Could not query the GPU. Check that:\n"
+                "1. umr is installed\n"
+                "2. redcontrol-helper is installed (run ./install.sh)\n"
+                "3. you allowed the authentication prompt\n"
+                "4. AMD GPU drivers are loaded")
             return
 
         # Parse all GPUs with their info
@@ -23566,36 +23571,23 @@ sudo -n umr --version
         """Scan outputs with proper CRTC→FMT mapping"""
         console_print(f"DEBUG: scan_monitors() called, gpu_instance={self.gpu_instance}")
 
-        # TEST: Check if passwordless sudo cat works
-        console_print("\n=== TESTING PASSWORDLESS SUDO CAT ===")
-        test_result = subprocess.run(['sudo', '-n', '/usr/bin/true'],
-                                    capture_output=True, text=True, timeout=1)
-        if test_result.returncode == 0:
-            console_print("✓ Passwordless sudo works for /usr/bin/true")
-
-            # Now test cat specifically - try multiple paths until one works
-            test_paths = glob.glob("/sys/kernel/debug/dri/*/crtc-*/amdgpu_current_colorspace")
-            if test_paths:
-                cat_worked = False
-                for test_path in test_paths:
-                    # Silently test each path - redirect stderr to /dev/null
-                    cat_result = self._debugfs_result(test_path)
-                    if cat_result.returncode == 0 and cat_result.stdout.strip():
-                        console_print(f"✓ Passwordless sudo cat works on: {test_path}")
-                        console_print("  Colorspace should be readable.")
-                        cat_worked = True
-                        break
-                
-                if not cat_worked:
-                    console_print("✗ Passwordless sudo cat FAILED on all colorspace files!")
-                    console_print("  This means /usr/bin/cat is NOT in sudoers file.")
-                    console_print("  You need to re-enable passwordless access.")
+        # Probe whether debugfs colorspace files are reachable at all.
+        console_print("\n=== debugfs colorspace probe ===")
+        test_paths = glob.glob("/sys/kernel/debug/dri/*/crtc-*/amdgpu_current_colorspace")
+        if not test_paths:
+            probe = self.list_debugfs(name='amdgpu_current_colorspace')
+            test_paths = [p for p in probe.stdout.split('\n') if p.strip()]
+        if test_paths:
+            for test_path in test_paths:
+                if (self.read_debugfs(test_path) or '').strip():
+                    console_print(f"✓ colorspace readable: {test_path}")
+                    break
             else:
-                console_print("  No colorspace files found to test")
+                console_print("✗ no colorspace file could be read")
+                console_print("  Check the helper: ls -l /usr/libexec/redcontrol-helper")
         else:
-            console_print("✗ Passwordless sudo doesn't work!")
-            console_print("  You need to enable passwordless access from Auto-Start menu")
-        console_print("=== END PASSWORDLESS TEST ===\n")
+            console_print("  No colorspace files found to test")
+        console_print("=== end probe ===\n")
 
         if self.gpu_instance is None:
             console_print("DEBUG: gpu_instance is None, returning early")
@@ -26796,13 +26788,11 @@ sudo -n umr --version
             self.disable_all(info['index'])
 
 def check_root():
-    """Warn if not root, but don't require it (UMR will use sudo)"""
+    """Note how privileges will be obtained. Root is neither needed nor wanted."""
     if os.geteuid() != 0:
-        # Not running as root - that's OK! UMR will use sudo
-        # Just show a one-time info message
-        console_print("ℹ️  Running as normal user (recommended!)")
-        console_print("ℹ️  UMR commands will use 'sudo' and may prompt for password")
-        console_print("ℹ️  To avoid password prompts, see: Auto-Start → Passwordless Access")
+        console_print("ℹ️  Running as normal user (recommended)")
+        console_print("ℹ️  GPU access goes through redcontrol-helper via polkit")
+        console_print("ℹ️  You are asked to authenticate once per login session")
         console_print("")
 
 def main():
@@ -26849,8 +26839,8 @@ def main():
         _builtins.print("  --quiet           Force quiet console output (default)")
         _builtins.print("  --debug           Verbose console output")
         _builtins.print("")
-        _builtins.print("Note: RedControl runs as a normal user. UMR commands use 'sudo'.")
-        _builtins.print("      Set up passwordless sudo to avoid prompts: Auto-Start → Passwordless Access")
+        _builtins.print("Note: RedControl runs as a normal user. Privileged GPU access goes")
+        _builtins.print("      through /usr/libexec/redcontrol-helper, authorised by polkit.")
         sys.exit(0)
 
 
