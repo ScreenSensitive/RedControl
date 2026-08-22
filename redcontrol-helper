@@ -52,8 +52,22 @@ RE_FIELD = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 # turned into "write any GPU register". Extend via POLICY_FILE:
 #     allow-register = ^mmDIG[0-9]*_.*$
 #     allow-field    = ^DIG_[A-Z0-9_]+$
-WRITE_REGISTER_ALLOW = [r"^mm[A-Za-z0-9_]*FMT[A-Za-z0-9_]*$"]
-WRITE_FIELD_ALLOW = [r"^FMT_[A-Z0-9_]+$"]
+#
+# These cover exactly what RedControl writes: FMT dithering/truncation, DP
+# component depth, HDMI deep colour, and the OTG CRC engine used by the static
+# signal test.
+WRITE_REGISTER_ALLOW = [
+    r"^mmFMT[0-9]*_FMT_[A-Z0-9_]+$",
+    r"^mmDP[0-9]*_DP_PIXEL_FORMAT$",
+    r"^mmDIG[0-9]*_HDMI_CONTROL$",
+    r"^mmOTG[0-9]*_OTG_CRC[0-9A-Z_]*$",
+]
+WRITE_FIELD_ALLOW = [
+    r"^FMT_[A-Z0-9_]+$",
+    r"^DP_COMPONENT_DEPTH$",
+    r"^HDMI_DEEP_COLOR_(DEPTH|ENABLE)$",
+    r"^OTG_CRC[0-9A-Z_]*$",
+]
 
 MAX_VALUE = 0xFFFFFFFF
 
@@ -166,8 +180,13 @@ def want_register(raw, for_write):
         die(2, "malformed register name: %r" % raw)
     if not for_write:
         return raw
-    reg, _, field = raw.partition(".")
-    if not field:
+    # umr names are dotted and fully qualified, e.g.
+    #   dimgrey_cavefish.dcn30.mmFMT0_FMT_BIT_DEPTH_CONTROL.FMT_TRUNCATE_MODE
+    # The field is the last component and the register the one before it;
+    # splitting on the first dot yields the ASIC name and rejects every write.
+    reg_path, _, field = raw.rpartition(".")
+    reg = reg_path.rpartition(".")[2]
+    if not field or not reg:
         die(2, "writes require a REGISTER.FIELD name")
     if not RE_FIELD.match(field):
         die(2, "malformed field name: %r" % field)
