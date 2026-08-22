@@ -173,7 +173,7 @@ head "4. Optional extras (nicer names, tray icon)"
 if ask "Install optional Python extras (pystray, pillow) for the tray icon?"; then
   # Newer distros (PEP 668, e.g. Ubuntu 24.04 / Mint 22) refuse plain pip installs;
   # --break-system-packages with --user only touches ~/.local, so it's a safe fallback.
-  if python3 -m pip install --user --upgrade pystray pillow \
+  if python3 -m pip install --user --upgrade pystray pillow 2>/dev/null \
      || python3 -m pip install --user --upgrade --break-system-packages pystray pillow; then
     ok "extras installed"
   else
@@ -182,7 +182,7 @@ if ask "Install optional Python extras (pystray, pillow) for the tray icon?"; th
 fi
 
 # ---- 5. Desktop launcher + icon ---------------------------------------------
-head "4. Menu launcher"
+head "5. Menu launcher"
 APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons"
 mkdir -p "$APPS" "$ICONS"
 chmod +x "$HERE/redcontrol.py" 2>/dev/null
