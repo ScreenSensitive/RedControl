@@ -19797,17 +19797,11 @@ class RedControl:
         # "Auto-Start" no longer describes it.
         menubar.add_cascade(label="Settings", menu=autostart_menu)
 
-        autostart_enabled, points_here, _ = self.autostart_state()
         autostart_menu.add_checkbutton(
             label="Start on login",
             onvalue=True, offvalue=False,
             variable=self._autostart_menu_var(),
             command=self.toggle_autostart)
-        if autostart_enabled and not points_here:
-            # The entry exists but launches a different copy of RedControl, so
-            # the checkmark alone would misrepresent what is set to run.
-            autostart_menu.add_command(label="   ↳ currently runs another copy — point it here",
-                                       command=self.enable_autostart_and_refresh)
 
         autostart_menu.add_checkbutton(
             label="Auto-Apply saved settings on start",
@@ -22594,18 +22588,28 @@ class RedControl:
     def auto_apply_enabled(self):
         return bool((self.load_settings() or {}).get('auto_apply', False))
 
+    def autostart_runs_this_copy(self):
+        """True only when login starts *this* checkout.
+
+        An entry pointing at a different copy is reported as off: ticking the
+        box then repoints it here, which is what "start on login" means to
+        someone reading the menu.
+        """
+        enabled, points_here, _ = self.autostart_state()
+        return bool(enabled and points_here)
+
     def _autostart_menu_var(self):
         """Tk variable backing the Auto-Start checkmark."""
         var = getattr(self, '_autostart_var', None)
         if var is None:
             var = tk.BooleanVar()
             self._autostart_var = var
-        var.set(self.is_autostart_enabled())
+        var.set(self.autostart_runs_this_copy())
         return var
 
     def toggle_autostart(self):
         """Flip auto-start, matching the checkbutton the user just clicked."""
-        if self.is_autostart_enabled():
+        if self.autostart_runs_this_copy():
             self.disable_autostart()
         else:
             self.enable_autostart()
@@ -23046,15 +23050,11 @@ Restart this tool to detect UMR automatically.
         menubar.add_cascade(label="Settings", menu=autostart_menu)
 
         # Auto-Start section
-        autostart_enabled, points_here, _ = self.autostart_state()
         autostart_menu.add_checkbutton(
             label="Start on login",
             onvalue=True, offvalue=False,
             variable=self._autostart_menu_var(),
             command=self.toggle_autostart)
-        if autostart_enabled and not points_here:
-            autostart_menu.add_command(label="   ↳ currently runs another copy — point it here",
-                                       command=self.enable_autostart_and_refresh)
 
         autostart_menu.add_checkbutton(
             label="Auto-Apply saved settings on start",
