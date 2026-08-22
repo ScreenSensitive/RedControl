@@ -18,6 +18,7 @@ Verbs:
   read-debugfs  <path>               read one file under /sys/kernel/debug/dri
   list-debugfs                       list candidate debugfs files
   ensure-debugfs                     mount debugfs if it is not mounted
+  version                            print this helper's version
 
 Add --dry-run before the verb to print the command that would run without
 touching the hardware.
@@ -33,6 +34,10 @@ import stat
 import shlex
 import syslog
 import subprocess
+
+# Bumped whenever the verb set or the write allowlist changes, so a GUI that
+# expects newer behaviour can tell it is talking to a stale installed copy.
+HELPER_VERSION = "1.1"
 
 DEBUGFS_ROOT = "/sys/kernel/debug"
 DRI_ROOT = os.path.join(DEBUGFS_ROOT, "dri")
@@ -277,6 +282,13 @@ def cmd_read_debugfs(args, dry_run):
     return 0
 
 
+def cmd_version(args, dry_run):
+    if args:
+        die(2, "version takes no arguments")
+    print(HELPER_VERSION)
+    return 0
+
+
 def cmd_enumerate(args, dry_run):
     if args:
         die(2, "enumerate takes no arguments")
@@ -324,6 +336,7 @@ VERBS = {
     "read-debugfs": cmd_read_debugfs,
     "list-debugfs": cmd_list_debugfs,
     "ensure-debugfs": cmd_ensure_debugfs,
+    "version": cmd_version,
 }
 
 
@@ -339,7 +352,7 @@ def main(argv):
     verb, rest = args[0], args[1:]
     if verb not in VERBS:
         die(2, "unknown verb %r (try --help)" % verb)
-    if not dry_run and os.geteuid() != 0:
+    if verb != "version" and not dry_run and os.geteuid() != 0:
         die(3, "must run as root (invoke via pkexec)")
     return VERBS[verb](rest, dry_run)
 

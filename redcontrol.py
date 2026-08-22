@@ -19404,6 +19404,10 @@ class RedControl:
             self.root.after(1200, self.offer_legacy_sudoers_removal)
         except Exception:
             pass
+        try:
+            self.root.after(1500, self.check_helper_version)
+        except Exception:
+            pass
         # Reapply saved settings if the user asked for that. Runs after
         # detection has populated the monitor tabs.
         try:
@@ -20433,6 +20437,11 @@ class RedControl:
     # "umr *" is equivalent to handing out a root shell. Authorisation is
     # polkit's job now, not a file in /etc/sudoers.d.
 
+    # Helper version this build expects. A GUI newer than the installed helper
+    # can ask for registers the helper's allowlist does not yet cover, and the
+    # writes are refused with nothing obvious to point at -- so say so plainly.
+    HELPER_REQUIRED_VERSION = "1.1"
+
     HELPER_CANDIDATES = ('/usr/libexec/redcontrol-helper',
                          '/usr/local/libexec/redcontrol-helper')
     LEGACY_SUDOERS = '/etc/sudoers.d/umr-passwordless'
@@ -20563,6 +20572,39 @@ class RedControl:
         return types.SimpleNamespace(returncode=0 if text is not None else 1,
                                      stdout=text or '',
                                      stderr='')
+
+    def check_helper_version(self):
+        """Warn once if the installed helper predates this build."""
+        if getattr(self, '_helper_version_checked', False):
+            return
+        self._helper_version_checked = True
+        helper = self.helper_path()
+        if not helper:
+            return
+        try:
+            # `version` needs no privileges, so this never raises a prompt.
+            out = subprocess.run([helper, 'version'], capture_output=True,
+                                 text=True, timeout=5)
+            installed = (out.stdout or '').strip() or '0.0'
+        except Exception:
+            return
+        if installed == self.HELPER_REQUIRED_VERSION:
+            return
+
+        def ver(s):
+            try:
+                return tuple(int(p) for p in s.split('.'))
+            except ValueError:
+                return (0,)
+        if ver(installed) < ver(self.HELPER_REQUIRED_VERSION):
+            messagebox.showwarning(
+                "Helper is out of date",
+                f"RedControl expects helper {self.HELPER_REQUIRED_VERSION} but "
+                f"{installed} is installed.\n\n"
+                "Newer GPU settings may be refused until it is updated. Run "
+                "./install.sh from the RedControl folder, or:\n\n"
+                "    sudo install -m 0755 -o root -g root redcontrol-helper \\\n"
+                "        /usr/libexec/redcontrol-helper")
 
     def report_helper_missing(self):
         if getattr(self, '_helper_warned', False):
@@ -21005,6 +21047,17 @@ class RedControl:
 
     # ---- diagnostics --------------------------------------------------------
 
+    def installed_helper_version(self):
+        helper = self.helper_path()
+        if not helper:
+            return "not installed"
+        try:
+            out = subprocess.run([helper, 'version'], capture_output=True,
+                                 text=True, timeout=5)
+            return (out.stdout or '').strip() or "unknown"
+        except Exception:
+            return "unknown"
+
     def build_diagnostics_text(self):
         """Read-only dump of what the tool is actually targeting."""
         lines = []
@@ -21017,6 +21070,8 @@ class RedControl:
         prefix_src = "override" if self.reg_prefix_override() else "probed"
         add(f"register prefix  : {self.reg_prefix}  ({prefix_src})")
         add(f"helper           : {self.helper_path() or 'NOT INSTALLED'}")
+        add(f"helper version   : {self.installed_helper_version()} "
+            f"(this build expects {self.HELPER_REQUIRED_VERSION})")
         add(f"authorised       : {bool(getattr(self, '_helper_authorized', False))}")
         add("")
 
@@ -26916,13 +26971,16 @@ sudo -n umr --version
             _lbl0.config(text="Testing…  keep the screen completely still", fg=self.fg)
 
         def _sample(n=0):
+            # One register, one read. The CRC advances every frame while
+            # OTG_CRC_CONT_EN is set, and a second read lands a frame or more
+            # later, so combining CRC0_DATA_RG with CRC0_DATA_B produced a
+            # tuple stitched from two different frames -- every sample came out
+            # unique and a static screen reported as changing. R and G share a
+            # register, so they are consistent with each other.
             rg = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_CRC0_DATA_RG",
                                          ["CRC0_R_CR", "CRC0_G_Y"]) or {}
-            b = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_CRC0_DATA_B",
-                                        ["CRC0_B_CB"]) or {}
-            if rg or b:
-                samples.append((rg.get("CRC0_R_CR"), rg.get("CRC0_G_Y"),
-                                b.get("CRC0_B_CB")))
+            if rg:
+                samples.append((rg.get("CRC0_R_CR"), rg.get("CRC0_G_Y")))
             if n < 11:
                 self.root.after(120, lambda: _sample(n + 1))
                 return
