@@ -20995,6 +20995,7 @@ class RedControl:
     def switch_gpu(self):
         """Switch to selected GPU from dropdown"""
         console_print("DEBUG: switch_gpu() called")
+        previous_idx = getattr(self, 'selected_gpu_idx', None)
         selection = self.gpu_selector_var.get()
         console_print(f"DEBUG: Selected: {selection}")
 
@@ -21026,8 +21027,24 @@ class RedControl:
             # Rescan monitors for this GPU (will show button if monitors found)
             console_print(f"DEBUG: Calling scan_monitors() for GPU {index}")
             self.scan_monitors()
-            # scan_monitors may fall back to another GPU when this one drives
-            # no outputs; keep the dropdown on whatever ended up selected.
+
+            # A GPU with nothing plugged into it leaves an empty panel and no
+            # way to act, so fall back to the one that does drive outputs
+            # instead of stranding the user there.
+            if not self.active_outputs and previous_idx is not None \
+                    and previous_idx != index:
+                dead_name = self.gpu_name
+                self.select_gpu(previous_idx)
+                self.active_outputs = {}
+                self.initial_values = {}
+                for tab in self.notebook.tabs():
+                    self.notebook.forget(tab)
+                self.scan_monitors()
+                self.show_status(
+                    f"{dead_name} has no connected outputs — switched back to "
+                    f"{self.gpu_name}.", "warn")
+
+            # Keep the dropdown on whatever ended up selected.
             self.sync_gpu_selector()
         else:
             console_print(f"DEBUG: Could not parse GPU selection: {selection}")
@@ -24469,6 +24486,26 @@ sudo -n umr --version
         content = tk.Frame(frame, bg=self.theme.get('bg_content', self.bg))
         content.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
+        # Failure banner: hidden until something fails to read or apply, so a
+        # write the GPU refused stays visible instead of scrolling past in the
+        # status line.
+        self.failure_banners = getattr(self, 'failure_banners', {})
+        banner = tk.Frame(content, bg=self.theme.get('bg_card', self.bg))
+        banner_lbl = tk.Label(banner, text="", justify='left', anchor='w',
+                              font=('SF Pro Text', 10),
+                              bg=self.theme.get('bg_card', self.bg),
+                              fg=self.theme.get('fg', '#000000'))
+        banner_lbl.pack(side='left', fill=tk.X, expand=True, padx=(12, 8), pady=8)
+        retry_btn = tk.Button(banner, text="Retry",
+                              command=lambda i=idx: self.retry_failed_controls(i),
+                              bg=self.theme.get('btn', self.accent),
+                              fg=self.theme.get('btn_fg', 'white'),
+                              relief=tk.FLAT, font=('SF Pro Text', 9, 'bold'),
+                              padx=10, pady=2, cursor='hand2')
+        retry_btn.pack(side='right', padx=(0, 12))
+        self.failure_banners[idx] = {'frame': banner, 'label': banner_lbl,
+                                     'parent': content}
+
         # === Section 1: Main Dithering Controls ===
         dither_section = tk.Frame(content, bg=self.bg)
         dither_section.pack(fill=tk.X, padx=20, pady=(12, 0))
@@ -26766,6 +26803,84 @@ sudo -n umr --version
     # on every connected monitor, comparing hardware against what the UI says
     # and rewriting only the fields that drifted.
 
+    # ---- surfacing controls that failed to read or apply --------------------
+
+    PRETTY_FIELD = {
+        'FMT_SPATIAL_DITHER_EN': 'Spatial Dither',
+        'FMT_TEMPORAL_DITHER_EN': 'Temporal Dither',
+        'FMT_RGB_RANDOM_ENABLE': 'RGB Noise',
+        'FMT_HIGHPASS_RANDOM_ENABLE': 'Highpass Random',
+        'FMT_FRAME_RANDOM_ENABLE': 'Frame Random',
+        'FMT_TRUNCATE_EN': 'Truncate',
+        'FMT_SPATIAL_DITHER_DEPTH': 'Spatial depth',
+        'FMT_SPATIAL_DITHER_MODE': 'Spatial mode',
+        'FMT_TEMPORAL_DITHER_DEPTH': 'Temporal depth',
+        'FMT_TEMPORAL_DITHER_OFFSET': 'Temporal offset',
+        'FMT_TRUNCATE_DEPTH': 'Truncate depth',
+        'FMT_TRUNCATE_MODE': 'Truncate mode',
+        '__read__': 'Reading this output',
+    }
+
+    def note_control_failure(self, idx, field, reason):
+        store = getattr(self, 'control_failures', None)
+        if store is None:
+            store = self.control_failures = {}
+        store.setdefault(idx, {})[field] = reason
+        self.update_failure_banner(idx)
+
+    def clear_control_failure(self, idx, field):
+        store = getattr(self, 'control_failures', {}) or {}
+        if idx in store and field in store[idx]:
+            del store[idx][field]
+            self.update_failure_banner(idx)
+
+    def update_failure_banner(self, idx):
+        widgets = (getattr(self, 'failure_banners', {}) or {}).get(idx)
+        if not widgets:
+            return
+        failures = (getattr(self, 'control_failures', {}) or {}).get(idx) or {}
+        if not failures:
+            try:
+                widgets['frame'].pack_forget()
+            except Exception:
+                pass
+            return
+
+        lines = []
+        for field, reason in sorted(failures.items()):
+            lines.append(f"   • {self.PRETTY_FIELD.get(field, field)} — {reason}")
+        noun = "setting" if len(failures) == 1 else "settings"
+        text = (f"⚠  {len(failures)} {noun} did not apply on this output:\n"
+                + "\n".join(lines))
+        try:
+            widgets['label'].config(text=text)
+            widgets['frame'].pack(fill=tk.X, padx=20, pady=(10, 0))
+        except Exception:
+            pass
+
+    def retry_failed_controls(self, idx):
+        """Re-apply everything the UI shows for this output, then re-read."""
+        failures = dict((getattr(self, 'control_failures', {}) or {}).get(idx) or {})
+        if not failures:
+            return
+        (self.control_failures or {}).pop(idx, None)
+        for field in failures:
+            if field == '__read__':
+                continue
+            store = self.FIELD_TO_VAR.get(field)
+            var = (getattr(self, store, {}) or {}).get(idx) if store else None
+            if var is not None:
+                try:
+                    self.toggle_setting(idx, field, bool(var.get()))
+                except Exception as exc:
+                    self.log_debug(f"retry {field} failed: {exc}")
+        try:
+            self.sync_fmt_ui_from_hw(idx)
+            self.refresh_status(idx)
+        except Exception as exc:
+            self.log_debug(f"retry resync failed: {exc}")
+        self.update_failure_banner(idx)
+
     def write_field_verified(self, idx, field, value, var_store=None,
                              value_to_label=None, label=None):
         """Write one FMT bitfield and confirm the register actually took it.
@@ -26786,9 +26901,11 @@ sudo -n umr --version
             # read_umr_bitfields() adds asic.block itself -- pass the bare name.
             actual = (self.read_umr_bitfields(reg_name, [field]) or {}).get(field)
             if actual is not None and int(actual) == int(value):
+                self.clear_control_failure(idx, field)
                 return True
             if actual is None:
-                return True  # cannot verify; assume the write stood
+                self.note_control_failure(idx, field, "could not read the register back")
+                return True  # cannot verify; leave the control as the user set it
 
         var = (getattr(self, var_store, {}) or {}).get(idx) if var_store else None
         if var is not None:
@@ -26800,6 +26917,7 @@ sudo -n umr --version
             except Exception:
                 pass
         reason = "not authorised" if wrote is None else "the driver reset it immediately"
+        self.note_control_failure(idx, field, reason)
         self.show_status(f"{label or field} did not take on {connector} — {reason}.",
                          "error")
         return False
@@ -27066,6 +27184,7 @@ sudo -n umr --version
                     pass
             reason = ("not authorised" if wrote is None
                       else "the driver reset it immediately")
+            self.note_control_failure(idx, bitfield, reason)
             self.show_status(f"{bitfield} did not take on {connector_name} "
                              f"— {reason}.", "error")
             self.log_command(f"{connector_name}: {bitfield}", before_str,
@@ -27073,6 +27192,7 @@ sudo -n umr --version
                              "FAILED", success=False)
             return
 
+        self.clear_control_failure(idx, bitfield)
         self.status_var.set(f"Set {bitfield} = {val}")
 
         # Log to debug console
@@ -27260,7 +27380,13 @@ sudo -n umr --version
         output = self.run_umr_command(["-i", str(self.gpu_instance), "-O", "bits", "-r", path])
 
         if not output:
+            # Silently returning here is how every control ended up stuck at
+            # its default with no indication anything had gone wrong.
+            self.note_control_failure(
+                idx, '__read__',
+                "register could not be read — controls below may not reflect the GPU")
             return
+        self.clear_control_failure(idx, '__read__')
 
         # Save initial values if requested (first time only)
         if save_initial and f"FMT{idx}" not in self.initial_values:
