@@ -20494,7 +20494,17 @@ class RedControl:
         if result.returncode == 0:
             # polkit's auth_admin_keep caches the authorisation for the rest of
             # the session, so background timers may now run without prompting.
+            first_time = not self._helper_authorized
             self._helper_authorized = True
+            if first_time:
+                # Reads that ran before authorisation returned nothing, and the
+                # controls that consume them fail silently -- leaving every
+                # switch showing its default (off) whatever the hardware says.
+                # Now that reads work, populate them for real.
+                try:
+                    self.root.after(50, self.resync_all_tabs_from_hw)
+                except Exception:
+                    pass
             return result.stdout
         if result.returncode in (126, 127):
             # pkexec: dismissed dialog, or not authorised.
@@ -22363,6 +22373,17 @@ class RedControl:
                 self.colorspace_vars[idx].set(cs)
         except Exception as exc:
             self.log_debug(f"colorspace refresh for {connector_name} failed: {exc}")
+
+    def resync_all_tabs_from_hw(self):
+        """Repopulate every connected monitor's controls from the hardware."""
+        for idx in sorted(self.connected_output_indices()):
+            for fn, args in ((self.sync_fmt_ui_from_hw, (idx,)),
+                             (self.refresh_status, (idx,)),
+                             (self.sync_connector_ui_from_system, (idx,))):
+                try:
+                    fn(*args)
+                except Exception as exc:
+                    self.log_debug(f"resync {fn.__name__}({idx}) failed: {exc}")
 
     def sync_current_tab_from_hw(self):
         """Re-read the visible monitor's registers into its controls.
@@ -26716,14 +26737,16 @@ sudo -n umr --version
         value the GPU does not have -- a silent no-op (write refused, or the
         driver undoing it) previously left the UI lying about the register.
         """
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg_name = f"mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{reg_name}"
         connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx, f"FMT{idx}")
 
         wrote = self.run_umr_command(
             ["-i", str(self.gpu_instance), "-wb", f"{path}.{field}", str(value)])
         actual = None
         if wrote is not None:
-            actual = (self.read_umr_bitfields(path, [field]) or {}).get(field)
+            # read_umr_bitfields() adds asic.block itself -- pass the bare name.
+            actual = (self.read_umr_bitfields(reg_name, [field]) or {}).get(field)
             if actual is not None and int(actual) == int(value):
                 return True
             if actual is None:
@@ -26802,7 +26825,8 @@ sudo -n umr --version
                 self.log_debug(f"auto-reapply check FMT{idx} failed: {exc}")
 
     def _reapply_check_output(self, idx):
-        reg = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg_name = f"mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg = f"{self.asic_name}.{self.block_name}.{reg_name}"
         wanted = {}
         for store, field in self.REAPPLY_FIELDS:
             d = getattr(self, store, {}) or {}
@@ -26816,7 +26840,7 @@ sudo -n umr --version
         if not wanted:
             return
 
-        current = self.read_umr_bitfields(reg, list(wanted.keys())) or {}
+        current = self.read_umr_bitfields(reg_name, list(wanted.keys())) or {}
         if not current:
             return  # register unreadable right now (e.g. output asleep)
 
@@ -26972,7 +26996,8 @@ sudo -n umr --version
 
     def toggle_setting(self, idx, bitfield, value):
         """Toggle setting with debug logging"""
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg_name = f"mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{reg_name}"
         val = 1 if value else 0
 
         # Get connector name for logging
@@ -26991,7 +27016,7 @@ sudo -n umr --version
         # UI must not claim a state the register does not have.
         actual = None
         if wrote is not None:
-            check = self.read_umr_bitfields(path, [bitfield]) or {}
+            check = self.read_umr_bitfields(reg_name, [bitfield]) or {}
             actual = check.get(bitfield)
 
         if wrote is None or (actual is not None and int(actual) != val):
