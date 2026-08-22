@@ -20593,7 +20593,24 @@ class RedControl:
         return var
 
     def polkit_rule_installed(self):
-        return os.path.exists(self.POLKIT_RULE)
+        """Whether the no-prompt rule is in place.
+
+        /etc/polkit-1/rules.d is 0750 root:polkitd, so os.path.exists() is
+        always False for a normal user and the menu could never show a
+        checkmark. The app records its own state instead, and only trusts the
+        filesystem when it can actually see the directory (running as root).
+        """
+        try:
+            if os.access(os.path.dirname(self.POLKIT_RULE), os.R_OK):
+                return os.path.exists(self.POLKIT_RULE)
+        except Exception:
+            pass
+        return bool((self.load_settings() or {}).get('polkit_rule', False))
+
+    def record_polkit_rule(self, installed):
+        settings = self.load_settings() or {}
+        settings['polkit_rule'] = bool(installed)
+        self.save_settings(settings)
 
     def polkit_rule_text(self):
         return (
@@ -20631,6 +20648,7 @@ class RedControl:
             argv += ['rm', '-f', self.POLKIT_RULE]
             rc = subprocess.run(argv, capture_output=True, text=True).returncode
             if rc == 0:
+                self.record_polkit_rule(False)
                 messagebox.showinfo("Done", "Authentication prompt restored.")
                 self.refresh_menubar()
             else:
@@ -20668,6 +20686,7 @@ class RedControl:
                 pass
 
         if result.returncode == 0:
+            self.record_polkit_rule(True)
             messagebox.showinfo(
                 "Done",
                 "RedControl will no longer ask for authentication on this "
@@ -21005,7 +21024,9 @@ class RedControl:
         add("-" * 58)
         pipes = self.read_all_fmt_pipes()
         if not pipes:
-            add("  (could not read FMT registers)")
+            add("  FAILED — could not read the FMT registers.")
+            add("  Check that umr is installed and the helper is authorised;")
+            add("  the header above shows both.")
 
         # Which connector each pipe drives, so a pipe is identifiable without
         # cross-referencing the mapping section below.
@@ -21028,10 +21049,19 @@ class RedControl:
                 return "on" + (f"   ({detail})" if detail else "")
             return "off" + (f"   ({detail}, not in use)" if detail else "")
 
+        hidden = 0
         for idx in sorted(pipes):
             v = pipes[idx]
             conn = pipe_conn.get(idx)
-            label = f"{conn}" if conn else "no display attached"
+            programmed = any(v >> b & 1 for b in self.FMT_ENABLE_BITS)
+            # Idle, unattached pipes are noise. A pipe that is programmed but
+            # has no connector is kept: that combination is exactly what a
+            # wrong pipe-to-monitor mapping looks like, and hiding it would
+            # hide the evidence.
+            if not conn and not programmed:
+                hidden += 1
+                continue
+            label = conn if conn else "programmed but not mapped to a display"
             add("")
             add(f"  FMT{idx}  —  {label}      raw 0x{v:08X}")
             add(f"      truncation        "
@@ -21043,9 +21073,16 @@ class RedControl:
             add(f"      frame random      {state(field(v, 13))}")
             add(f"      rgb noise         {state(field(v, 14))}")
             add(f"      highpass random   {state(field(v, 15))}")
-            enabled = any(field(v, b) for b in self.FMT_ENABLE_BITS)
             if conn:
-                add(f"      => {'dithering is active on this display' if enabled else 'clean output, no dithering'}")
+                add(f"      => {'dithering is active on this display' if programmed else 'clean output, no dithering'}")
+            else:
+                add("      => WARNING: this pipe is configured but no display is "
+                    "mapped to it.")
+                add("         If your display looks wrong, set the pipe override "
+                    "below to this index.")
+        if hidden:
+            add("")
+            add(f"  ({hidden} idle pipe{'s' if hidden != 1 else ''} with no display hidden)")
         add("")
 
         add("Monitor -> pipe mapping")
@@ -21065,13 +21102,30 @@ class RedControl:
     def show_diagnostics(self):
         win = tk.Toplevel(self.root)
         win.title("Diagnostics")
-        win.geometry("720x560")
+        win.geometry("860x680")
+        win.minsize(640, 420)
         win.configure(bg=self.bg)
 
-        txt = tk.Text(win, wrap='none', bg=self.theme.get('bg_input', self.bg),
+        # Buttons first and anchored to the bottom, so a long report scrolls
+        # inside the text area instead of pushing them off the window.
+        row = tk.Frame(win, bg=self.bg)
+        row.pack(side='bottom', fill=tk.X, padx=12, pady=10)
+
+        body = tk.Frame(win, bg=self.bg)
+        body.pack(side='top', fill=tk.BOTH, expand=True, padx=12, pady=(12, 0))
+
+        yscroll = tk.Scrollbar(body, orient='vertical')
+        yscroll.pack(side='right', fill='y')
+        xscroll = tk.Scrollbar(body, orient='horizontal')
+        xscroll.pack(side='bottom', fill='x')
+
+        txt = tk.Text(body, wrap='none', bg=self.theme.get('bg_input', self.bg),
                       fg=self.fg, insertbackground=self.fg,
-                      font=('monospace', 10), relief=tk.FLAT, padx=12, pady=12)
-        txt.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 6))
+                      font=('monospace', 10), relief=tk.FLAT, padx=12, pady=12,
+                      yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        txt.pack(side='left', fill=tk.BOTH, expand=True)
+        yscroll.config(command=txt.yview)
+        xscroll.config(command=txt.xview)
 
         def refresh():
             txt.config(state='normal')
@@ -21080,58 +21134,24 @@ class RedControl:
             txt.config(state='disabled')
         refresh()
 
-        row = tk.Frame(win, bg=self.bg)
-        row.pack(fill=tk.X, padx=12, pady=(0, 8))
+        def btn(text, cmd, side='right'):
+            tk.Button(row, text=text, command=cmd, relief=tk.FLAT,
+                      padx=12, pady=4, cursor='hand2',
+                      bg=self.theme.get('btn', self.accent),
+                      fg=self.theme.get('btn_fg', 'white'),
+                      font=('SF Pro Text', 9, 'bold')).pack(side=side, padx=(8, 0))
 
-        tk.Label(row, text="Register prefix:", bg=self.bg, fg=self.fg,
-                 font=('SF Pro Text', 10)).pack(side='left')
-        prefix_var = tk.StringVar(value=self.reg_prefix_override() or 'auto')
-        prefix_box = ttk.Combobox(row, textvariable=prefix_var, state='readonly',
-                                  values=['auto', 'mm', 'reg'], width=6)
-        prefix_box.pack(side='left', padx=(6, 16))
+        def copy_report():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.build_diagnostics_text())
+            self.show_status("Diagnostics copied to clipboard.", "info")
 
-        conns = [info.get('connector') for info in
-                 (getattr(self, 'active_outputs', {}) or {}).values()
-                 if info.get('connector')]
-        pipe_var = tk.StringVar(value='auto')
-        conn_var = tk.StringVar(value=conns[0] if conns else '')
-        if conns:
-            tk.Label(row, text="Pipe for:", bg=self.bg, fg=self.fg,
-                     font=('SF Pro Text', 10)).pack(side='left')
-            ttk.Combobox(row, textvariable=conn_var, state='readonly',
-                         values=conns, width=10).pack(side='left', padx=(6, 4))
-            ttk.Combobox(row, textvariable=pipe_var, state='readonly',
-                         values=['auto', '0', '1', '2', '3', '4', '5'],
-                         width=6).pack(side='left', padx=(0, 16))
-
-        def apply_overrides():
-            self.set_reg_prefix_override(prefix_var.get())
-            if conns and conn_var.get():
-                val = pipe_var.get()
-                self.set_pipe_override(conn_var.get(),
-                                       None if val == 'auto' else int(val))
-            self.show_status("Overrides saved — rescanning.", "info")
-            win.destroy()
-            self.scan_monitors()
-
-        tk.Button(row, text="Apply & Rescan", command=apply_overrides,
-                  bg=self.theme.get('btn', self.accent),
-                  fg=self.theme.get('btn_fg', 'white'), relief=tk.FLAT,
-                  font=('SF Pro Text', 9, 'bold'), padx=10, pady=3
-                  ).pack(side='right')
-        tk.Button(row, text="Copy", relief=tk.FLAT, padx=10, pady=3,
-                  bg=self.theme.get('btn', self.accent),
-                  fg=self.theme.get('btn_fg', 'white'),
-                  font=('SF Pro Text', 9, 'bold'),
-                  command=lambda: (self.root.clipboard_clear(),
-                                   self.root.clipboard_append(
-                                       self.build_diagnostics_text()),
-                                   self.show_status("Diagnostics copied.", "info"))
-                  ).pack(side='right', padx=(0, 8))
-        tk.Button(row, text="Refresh", command=refresh, relief=tk.FLAT,
-                  padx=10, pady=3, bg=self.theme.get('btn', self.accent),
-                  fg=self.theme.get('btn_fg', 'white'),
-                  font=('SF Pro Text', 9, 'bold')).pack(side='right', padx=(0, 8))
+        btn("Close", win.destroy)
+        btn("Copy", copy_report)
+        btn("Refresh", refresh)
+        tk.Label(row, text="Paste this into a bug report.", bg=self.bg,
+                 fg=self.theme.get('fg_muted', self.fg),
+                 font=('SF Pro Text', 9)).pack(side='left')
 
     def read_all_fmt_pipes(self):
         """{pipe index: raw register value} for every FMT block on this GPU.
