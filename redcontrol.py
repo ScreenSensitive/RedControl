@@ -19824,6 +19824,8 @@ class RedControl:
             command=self.toggle_auto_reapply)
 
         autostart_menu.add_separator()
+        autostart_menu.add_command(label="Diagnostics…", command=self.show_diagnostics)
+        autostart_menu.add_separator()
         autostart_menu.add_command(
             label=("Ask for authentication each login"
                    if self.polkit_rule_installed()
@@ -20951,6 +20953,156 @@ class RedControl:
     # enable bits; any of them set means the pipe is programmed.
     FMT_ENABLE_BITS = (0, 8, 13, 14, 15, 16)  # truncate, spatial, frame, rgb, highpass, temporal
 
+    # ---- overrides for hardware the probes get wrong ------------------------
+
+    def pipe_override_for(self, connector):
+        if not connector:
+            return None
+        ov = (self.load_settings() or {}).get('pipe_overrides', {}) or {}
+        val = ov.get(connector)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    def set_pipe_override(self, connector, pipe):
+        settings = self.load_settings() or {}
+        ov = settings.setdefault('pipe_overrides', {})
+        if pipe is None:
+            ov.pop(connector, None)
+        else:
+            ov[connector] = int(pipe)
+        self.save_settings(settings)
+
+    def reg_prefix_override(self):
+        val = (self.load_settings() or {}).get('reg_prefix', 'auto')
+        return val if val in ('mm', 'reg') else None
+
+    def set_reg_prefix_override(self, value):
+        settings = self.load_settings() or {}
+        settings['reg_prefix'] = value if value in ('mm', 'reg') else 'auto'
+        self.save_settings(settings)
+        self._reg_prefix_cache = {}
+
+    # ---- diagnostics --------------------------------------------------------
+
+    def build_diagnostics_text(self):
+        """Read-only dump of what the tool is actually targeting."""
+        lines = []
+        add = lines.append
+        add("RedControl diagnostics")
+        add("=" * 58)
+        add(f"GPU              : {getattr(self, 'gpu_name', '?')}")
+        add(f"ASIC / block     : {self.asic_name}.{self.block_name}")
+        add(f"umr instance     : {self.gpu_instance}")
+        prefix_src = "override" if self.reg_prefix_override() else "probed"
+        add(f"register prefix  : {self.reg_prefix}  ({prefix_src})")
+        add(f"helper           : {self.helper_path() or 'NOT INSTALLED'}")
+        add(f"authorised       : {bool(getattr(self, '_helper_authorized', False))}")
+        add("")
+
+        add("FMT pipes")
+        add("-" * 58)
+        pipes = self.read_all_fmt_pipes()
+        if not pipes:
+            add("  (could not read FMT registers)")
+        for idx in sorted(pipes):
+            v = pipes[idx]
+            bits = {
+                'truncate': v >> 0 & 1, 'spatial': v >> 8 & 1,
+                'frame_rnd': v >> 13 & 1, 'rgb_rnd': v >> 14 & 1,
+                'highpass': v >> 15 & 1, 'temporal': v >> 16 & 1,
+            }
+            on = [k for k, b in bits.items() if b]
+            state = ", ".join(on) if on else "nothing enabled"
+            add(f"  FMT{idx}  0x{v:08X}   {state}")
+        add("")
+
+        add("Monitor -> pipe mapping")
+        add("-" * 58)
+        names = getattr(self, 'monitor_connector_names', {}) or {}
+        outputs = getattr(self, 'active_outputs', {}) or {}
+        if not outputs:
+            add("  (no active outputs)")
+        for key, info in sorted(outputs.items()):
+            idx = info.get('index')
+            conn = info.get('connector') or names.get(idx, '?')
+            ov = self.pipe_override_for(conn)
+            how = f"override -> FMT{ov}" if ov is not None else "auto-resolved"
+            add(f"  {conn:<12} FMT{idx}   ({how})   {info.get('resolution', '?')}")
+        return "\n".join(lines)
+
+    def show_diagnostics(self):
+        win = tk.Toplevel(self.root)
+        win.title("Diagnostics")
+        win.geometry("720x560")
+        win.configure(bg=self.bg)
+
+        txt = tk.Text(win, wrap='none', bg=self.theme.get('bg_input', self.bg),
+                      fg=self.fg, insertbackground=self.fg,
+                      font=('monospace', 10), relief=tk.FLAT, padx=12, pady=12)
+        txt.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 6))
+
+        def refresh():
+            txt.config(state='normal')
+            txt.delete('1.0', tk.END)
+            txt.insert('1.0', self.build_diagnostics_text())
+            txt.config(state='disabled')
+        refresh()
+
+        row = tk.Frame(win, bg=self.bg)
+        row.pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        tk.Label(row, text="Register prefix:", bg=self.bg, fg=self.fg,
+                 font=('SF Pro Text', 10)).pack(side='left')
+        prefix_var = tk.StringVar(value=self.reg_prefix_override() or 'auto')
+        prefix_box = ttk.Combobox(row, textvariable=prefix_var, state='readonly',
+                                  values=['auto', 'mm', 'reg'], width=6)
+        prefix_box.pack(side='left', padx=(6, 16))
+
+        conns = [info.get('connector') for info in
+                 (getattr(self, 'active_outputs', {}) or {}).values()
+                 if info.get('connector')]
+        pipe_var = tk.StringVar(value='auto')
+        conn_var = tk.StringVar(value=conns[0] if conns else '')
+        if conns:
+            tk.Label(row, text="Pipe for:", bg=self.bg, fg=self.fg,
+                     font=('SF Pro Text', 10)).pack(side='left')
+            ttk.Combobox(row, textvariable=conn_var, state='readonly',
+                         values=conns, width=10).pack(side='left', padx=(6, 4))
+            ttk.Combobox(row, textvariable=pipe_var, state='readonly',
+                         values=['auto', '0', '1', '2', '3', '4', '5'],
+                         width=6).pack(side='left', padx=(0, 16))
+
+        def apply_overrides():
+            self.set_reg_prefix_override(prefix_var.get())
+            if conns and conn_var.get():
+                val = pipe_var.get()
+                self.set_pipe_override(conn_var.get(),
+                                       None if val == 'auto' else int(val))
+            self.show_status("Overrides saved — rescanning.", "info")
+            win.destroy()
+            self.scan_monitors()
+
+        tk.Button(row, text="Apply & Rescan", command=apply_overrides,
+                  bg=self.theme.get('btn', self.accent),
+                  fg=self.theme.get('btn_fg', 'white'), relief=tk.FLAT,
+                  font=('SF Pro Text', 9, 'bold'), padx=10, pady=3
+                  ).pack(side='right')
+        tk.Button(row, text="Copy", relief=tk.FLAT, padx=10, pady=3,
+                  bg=self.theme.get('btn', self.accent),
+                  fg=self.theme.get('btn_fg', 'white'),
+                  font=('SF Pro Text', 9, 'bold'),
+                  command=lambda: (self.root.clipboard_clear(),
+                                   self.root.clipboard_append(
+                                       self.build_diagnostics_text()),
+                                   self.show_status("Diagnostics copied.", "info"))
+                  ).pack(side='right', padx=(0, 8))
+        tk.Button(row, text="Refresh", command=refresh, relief=tk.FLAT,
+                  padx=10, pady=3, bg=self.theme.get('btn', self.accent),
+                  fg=self.theme.get('btn_fg', 'white'),
+                  font=('SF Pro Text', 9, 'bold')).pack(side='right', padx=(0, 8))
+
     def read_all_fmt_pipes(self):
         """{pipe index: raw register value} for every FMT block on this GPU.
 
@@ -20968,12 +21120,16 @@ class RedControl:
                 continue
         return pipes
 
-    def resolve_fmt_index(self, crtc_num):
+    def resolve_fmt_index(self, crtc_num, connector=None):
         """Which FMT pipe actually drives this CRTC.
 
-        Prefers the encoder's own DIG_SOURCE_SELECT. Falls back to the only
-        pipe with an enable bit set, and finally to the CRTC number.
+        An explicit override wins; then the encoder's own DIG_SOURCE_SELECT;
+        then the only pipe with an enable bit set; finally the CRTC number.
         """
+        override = self.pipe_override_for(connector)
+        if override is not None:
+            self.log_debug(f"{connector}: pipe override -> FMT{override}")
+            return override
         try:
             for enc in (self.detect_signal_encoders() or []):
                 if enc.get('source') is not None and enc.get('source') == crtc_num:
@@ -21000,6 +21156,10 @@ class RedControl:
         anything that builds a path itself has to pick the right one, and a
         probe that guesses wrong reports the GPU as having no outputs.
         """
+        forced = self.reg_prefix_override()
+        if forced:
+            self.reg_prefix = forced
+            return forced
         key = (self.asic_name, self.block_name)
         cache = getattr(self, '_reg_prefix_cache', None)
         if cache is None:
@@ -22856,6 +23016,8 @@ Restart this tool to detect UMR automatically.
             command=self.toggle_auto_reapply)
 
         autostart_menu.add_separator()
+        autostart_menu.add_command(label="Diagnostics…", command=self.show_diagnostics)
+        autostart_menu.add_separator()
         autostart_menu.add_command(
             label=("Ask for authentication each login"
                    if self.polkit_rule_installed()
@@ -24049,7 +24211,7 @@ sudo -n umr --version
                 # wrong on real hardware: a display on CRTC 0 can be driven by
                 # FMT1, in which case every read and write lands on an empty
                 # pipe -- succeeding, changing nothing, reporting all-off.
-                fmt_idx = self.resolve_fmt_index(crtc_num)
+                fmt_idx = self.resolve_fmt_index(crtc_num, connector)
 
                 path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{fmt_idx}_FMT_BIT_DEPTH_CONTROL"
                 output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
