@@ -20825,7 +20825,7 @@ class RedControl:
                         # Check if this card corresponds to our UMR instance by checking ASIC name
                         # This is a heuristic but should work in most cases
                         card_num = re.search(r'card(\d+)', card_path)
-                        if card_num and int(card_num.group(1)) == instance:
+                        if card_num and int(card_num.group(1), 0) == instance:
                             return pci_addr
                 except Exception:
                     continue
@@ -21025,7 +21025,7 @@ class RedControl:
         # Extract GPU index from "GPU 0: ..." format
         match = re.match(r'GPU (\d+):', selection)
         if match:
-            index = int(match.group(1))
+            index = int(match.group(1), 0)
             console_print(f"DEBUG: Switching to GPU index {index}")
             self.select_gpu(index)
 
@@ -21333,7 +21333,7 @@ class RedControl:
                 elif current_connector and 'CRTC:' in line:
                     crtc_match = re.search(r'CRTC:\s*(\d+)', line)
                     if crtc_match and current_connector in connectors:
-                        connectors[current_connector]['crtc'] = int(crtc_match.group(1))
+                        connectors[current_connector]['crtc'] = int(crtc_match.group(1), 0)
                         console_print(f"DEBUG: {current_connector} → CRTC {crtc_match.group(1)}")
 
             return connectors
@@ -21372,7 +21372,7 @@ class RedControl:
                         if 'max bpc:' in prop_line:
                             match = re.search(r'max bpc:\s*(\d+)', prop_line)
                             if match:
-                                return int(match.group(1))
+                                return int(match.group(1), 0)
                     break
 
             return None
@@ -21917,7 +21917,7 @@ class RedControl:
                         # Get physical size
                         size_match = re.search(r'(\d+)mm x (\d+)mm', line)
                         if size_match:
-                            width_mm = int(size_match.group(1))
+                            width_mm = int(size_match.group(1), 0)
                             height_mm = int(size_match.group(2))
                             width_in = round(width_mm / 25.4, 1)
                             height_in = round(height_mm / 25.4, 1)
@@ -23605,7 +23605,7 @@ sudo -n umr --version
             # Extract instance number
             inst_match = re.search(r'asic\.instance\s*==\s*(\d+)', line)
             if inst_match:
-                current_gpu['instance'] = int(inst_match.group(1))
+                current_gpu['instance'] = int(inst_match.group(1), 0)
 
             # Extract ASIC name (from "GPU #X => asic_name" line)
             asic_match = re.search(r'GPU\s+#\d+\s*=>\s*([a-z_0-9]+)', line)
@@ -25776,21 +25776,36 @@ sudo -n umr --version
         output = self.run_umr_command(["-i", str(self.gpu_instance), "-O", "bits", "-r", path])
         if not output:
             return None
-        result = {}
-        for field in fields:
-            m = re.search(rf"\.{re.escape(field)}\[.*?==\s*(0x[0-9a-fA-F]+|\d+)", output)
-            if m:
-                try:
-                    result[field] = int(m.group(1), 0)
-                except ValueError:
-                    pass
+        parsed = self.parse_umr_bits(output)
+        result = {f: parsed[f] for f in fields if f in parsed}
         missing = [f for f in fields if f not in result]
         if missing:
             console_print(f"DEBUG: parse MISS {missing} in {reg_name}; "
-                          f"raw={output.strip()[:300]!r}")
-        else:
-            console_print(f"DEBUG: parse OK {reg_name} -> {result}")
+                          f"saw {sorted(parsed)[:8]}; raw={output.strip()[:300]!r}")
         return result if result else None
+
+    @staticmethod
+    def parse_umr_bits(output):
+        """Parse every field out of `umr -O bits` output.
+
+        umr prints one field per line as
+
+            \t.FMT_TRUNCATE_EN[0:0]        == 0
+
+        Reading all of them in one pass, rather than running a separate
+        hand-written regex per field, means a spacing or formatting difference
+        cannot make individual fields silently unreadable.
+        """
+        fields = {}
+        for line in (output or '').splitlines():
+            m = re.match(r"\s*\.?([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\d+\s*:\s*\d+\s*\]"
+                         r"\s*==\s*(0x[0-9a-fA-F]+|\d+)", line)
+            if m:
+                try:
+                    fields[m.group(1)] = int(m.group(2), 0)
+                except ValueError:
+                    pass
+        return fields
 
     def detect_signal_encoders(self):
         """Probe DIG encoders via UMR and classify each active one as DP or HDMI.
@@ -26159,7 +26174,7 @@ sudo -n umr --version
                 return
             m = re.match(r"DIG(\d+)", w['encoder_var'].get())
             if m:
-                w['active_encoder'] = int(m.group(1))
+                w['active_encoder'] = int(m.group(1), 0)
                 self.refresh_signal_panel(idx, connector_name, redetect=False)
         encoder_box.bind('<<ComboboxSelected>>', on_encoder_selected)
 
@@ -26504,11 +26519,11 @@ sudo -n umr --version
             drm_name = None
             m = re.match(r'DisplayPort-(\d+)$', connector_name or '')
             if m:
-                drm_name = f"DP-{int(m.group(1)) + 1}"
+                drm_name = f"DP-{int(m.group(1), 0) + 1}"
             else:
                 m = re.match(r'HDMI-A-(\d+)$', connector_name or '')
                 if m:
-                    drm_name = f"HDMI-A-{int(m.group(1)) + 1}"
+                    drm_name = f"HDMI-A-{int(m.group(1), 0) + 1}"
                 elif connector_name and connector_name.startswith(('DP-', 'eDP', 'HDMI-A-')):
                     drm_name = connector_name
             if not drm_name:
@@ -26561,7 +26576,7 @@ sudo -n umr --version
         hi = re.search(r'Max:\s*(\d+)', txt)
         if not (lo and hi):
             return None
-        lo, hi = int(lo.group(1)), int(hi.group(1))
+        lo, hi = int(lo.group(1), 0), int(hi.group(1), 0)
         if lo == 0 and hi == 0:
             return "not supported"
         return f"{lo}–{hi} Hz"
@@ -26597,7 +26612,7 @@ sudo -n umr --version
         res = self.active_outputs.get(f"FMT{idx}", {}).get('resolution', '')
         m = re.match(r'(\d+)x(\d+)', res or '')
         if m:
-            hres, vres = int(m.group(1)), int(m.group(2))
+            hres, vres = int(m.group(1), 0), int(m.group(2))
 
         base = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}OTG{pipe}_OTG_CRC_CNTL"
         winx = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}OTG{pipe}_OTG_CRC0_WINDOWA_X_CONTROL"
@@ -27408,107 +27423,107 @@ sudo -n umr --version
 
             # Parse and save all initial values
             patterns = {
-                'spatial': r"FMT_SPATIAL_DITHER_EN.*==\s+(\d+)",
-                'temporal': r"FMT_TEMPORAL_DITHER_EN.*==\s+(\d+)",
-                'rgb_random': r"FMT_RGB_RANDOM_ENABLE.*==\s+(\d+)",
-                'hp_random': r"FMT_HIGHPASS_RANDOM_ENABLE.*==\s+(\d+)",
-                'frame_random': r"FMT_FRAME_RANDOM_ENABLE.*==\s+(\d+)",
-                'truncate_en': r"FMT_TRUNCATE_EN.*==\s+(\d+)"
+                'spatial': r"FMT_SPATIAL_DITHER_EN.*==\s*(0x[0-9a-fA-F]+|\d+)",
+                'temporal': r"FMT_TEMPORAL_DITHER_EN.*==\s*(0x[0-9a-fA-F]+|\d+)",
+                'rgb_random': r"FMT_RGB_RANDOM_ENABLE.*==\s*(0x[0-9a-fA-F]+|\d+)",
+                'hp_random': r"FMT_HIGHPASS_RANDOM_ENABLE.*==\s*(0x[0-9a-fA-F]+|\d+)",
+                'frame_random': r"FMT_FRAME_RANDOM_ENABLE.*==\s*(0x[0-9a-fA-F]+|\d+)",
+                'truncate_en': r"FMT_TRUNCATE_EN.*==\s*(0x[0-9a-fA-F]+|\d+)"
             }
 
             for key, pattern in patterns.items():
                 match = re.search(pattern, output)
                 if match:
-                    self.initial_values[f"FMT{idx}"][key] = (match.group(1) == "1")
+                    self.initial_values[f"FMT{idx}"][key] = (int(match.group(1), 0) == 1)
 
             # Save truncate depth
-            truncate_match = re.search(r"FMT_TRUNCATE_DEPTH.*==\s+(\d+)", output)
+            truncate_match = re.search(r"FMT_TRUNCATE_DEPTH.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if truncate_match:
-                depth_val = int(truncate_match.group(1))
+                depth_val = int(truncate_match.group(1), 0)
                 self.initial_values[f"FMT{idx}"]['truncate_depth'] = self.TRUNCATE_DEPTH_MAP.get(depth_val, "8-bit")
 
             # Save truncate mode
-            mode_match = re.search(r"FMT_TRUNCATE_MODE.*==\s+(\d+)", output)
+            mode_match = re.search(r"FMT_TRUNCATE_MODE.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if mode_match:
                 mode_map = {0: "Truncate", 1: "Round", 2: "Round (alt 1)", 3: "Round (alt 2)"}
-                mode_val = int(mode_match.group(1))
+                mode_val = int(mode_match.group(1), 0)
                 self.initial_values[f"FMT{idx}"]['truncate_mode'] = mode_map.get(mode_val, "Round")
 
             # Save spatial dither depth
-            spatial_match = re.search(r"FMT_SPATIAL_DITHER_DEPTH.*==\s+(\d+)", output)
+            spatial_match = re.search(r"FMT_SPATIAL_DITHER_DEPTH.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if spatial_match:
-                depth_val = int(spatial_match.group(1))
+                depth_val = int(spatial_match.group(1), 0)
                 self.initial_values[f"FMT{idx}"]['spatial_depth'] = self.DITHER_DEPTH_MAP.get(depth_val, "8-bit")
 
             # Save spatial dither mode
-            sp_mode_match = re.search(r"FMT_SPATIAL_DITHER_MODE.*==\s+(\d+)", output)
+            sp_mode_match = re.search(r"FMT_SPATIAL_DITHER_MODE.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if sp_mode_match:
-                mode_val = int(sp_mode_match.group(1))
+                mode_val = int(sp_mode_match.group(1), 0)
                 self.initial_values[f"FMT{idx}"]['spatial_mode'] = f"Mode {mode_val}"
 
             # Save temporal dither depth
-            temp_match = re.search(r"FMT_TEMPORAL_DITHER_DEPTH.*==\s+(\d+)", output)
+            temp_match = re.search(r"FMT_TEMPORAL_DITHER_DEPTH.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if temp_match:
-                depth_val = int(temp_match.group(1))
+                depth_val = int(temp_match.group(1), 0)
                 self.initial_values[f"FMT{idx}"]['temporal_depth'] = self.DITHER_DEPTH_MAP.get(depth_val, "8-bit")
 
             # Save temporal offset
-            offset_match = re.search(r"FMT_TEMPORAL_DITHER_OFFSET.*==\s+(\d+)", output)
+            offset_match = re.search(r"FMT_TEMPORAL_DITHER_OFFSET.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if offset_match:
-                self.initial_values[f"FMT{idx}"]['temporal_offset'] = int(offset_match.group(1))
+                self.initial_values[f"FMT{idx}"]['temporal_offset'] = int(offset_match.group(1), 0)
 
         # --- Update UI variables from current register state (keeps switches accurate) ---
         try:
             bool_fields = {
-                'spatial': (r"FMT_SPATIAL_DITHER_EN.*==\s+(\d+)", self.spatial_vars),
-                'temporal': (r"FMT_TEMPORAL_DITHER_EN.*==\s+(\d+)", self.temporal_vars),
-                'rgb_random': (r"FMT_RGB_RANDOM_ENABLE.*==\s+(\d+)", self.rgb_random_vars),
-                'hp_random': (r"FMT_HIGHPASS_RANDOM_ENABLE.*==\s+(\d+)", self.highpass_random_vars),
-                'frame_random': (r"FMT_FRAME_RANDOM_ENABLE.*==\s+(\d+)", self.frame_random_vars),
-                'truncate_en': (r"FMT_TRUNCATE_EN.*==\s+(\d+)", self.truncate_vars),
+                'spatial': (r"FMT_SPATIAL_DITHER_EN.*==\s*(0x[0-9a-fA-F]+|\d+)", self.spatial_vars),
+                'temporal': (r"FMT_TEMPORAL_DITHER_EN.*==\s*(0x[0-9a-fA-F]+|\d+)", self.temporal_vars),
+                'rgb_random': (r"FMT_RGB_RANDOM_ENABLE.*==\s*(0x[0-9a-fA-F]+|\d+)", self.rgb_random_vars),
+                'hp_random': (r"FMT_HIGHPASS_RANDOM_ENABLE.*==\s*(0x[0-9a-fA-F]+|\d+)", self.highpass_random_vars),
+                'frame_random': (r"FMT_FRAME_RANDOM_ENABLE.*==\s*(0x[0-9a-fA-F]+|\d+)", self.frame_random_vars),
+                'truncate_en': (r"FMT_TRUNCATE_EN.*==\s*(0x[0-9a-fA-F]+|\d+)", self.truncate_vars),
             }
 
             for _k, (pat, var_dict) in bool_fields.items():
                 m2 = re.search(pat, output)
                 if m2 and idx in var_dict:
                     try:
-                        var_dict[idx].set(int(m2.group(1)) == 1)
+                        var_dict[idx].set(int(m2.group(1), 0) == 1)
                     except Exception:
-                        var_dict[idx].set(bool(int(m2.group(1))))
+                        var_dict[idx].set(bool(int(m2.group(1), 0)))
 
             # Truncate depth
-            m2 = re.search(r"FMT_TRUNCATE_DEPTH.*==\s+(\d+)", output)
+            m2 = re.search(r"FMT_TRUNCATE_DEPTH.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m2 and idx in self.truncate_depth_vars:
-                depth_val = int(m2.group(1))
+                depth_val = int(m2.group(1), 0)
                 self.truncate_depth_vars[idx].set(self.TRUNCATE_DEPTH_MAP.get(depth_val, "8-bit"))
 
             # Truncate mode
-            m2 = re.search(r"FMT_TRUNCATE_MODE.*==\s+(\d+)", output)
+            m2 = re.search(r"FMT_TRUNCATE_MODE.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m2 and idx in self.truncate_mode_vars:
-                mode_val = int(m2.group(1))
+                mode_val = int(m2.group(1), 0)
                 mode_map = {0: "Truncate", 1: "Round", 2: "Round (alt 1)", 3: "Round (alt 2)"}
                 self.truncate_mode_vars[idx].set(mode_map.get(mode_val, "Round"))
 
             # Spatial dither depth/mode
-            m2 = re.search(r"FMT_SPATIAL_DITHER_DEPTH.*==\s+(\d+)", output)
+            m2 = re.search(r"FMT_SPATIAL_DITHER_DEPTH.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m2 and idx in self.spatial_depth_vars:
-                depth_val = int(m2.group(1))
+                depth_val = int(m2.group(1), 0)
                 self.spatial_depth_vars[idx].set(self.DITHER_DEPTH_MAP.get(depth_val, "8-bit"))
 
-            m2 = re.search(r"FMT_SPATIAL_DITHER_MODE.*==\s+(\d+)", output)
+            m2 = re.search(r"FMT_SPATIAL_DITHER_MODE.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m2 and idx in self.spatial_mode_vars:
-                mode_val = int(m2.group(1))
+                mode_val = int(m2.group(1), 0)
                 self.spatial_mode_vars[idx].set(f"Mode {mode_val}")
 
             # Temporal dither depth/offset
-            m2 = re.search(r"FMT_TEMPORAL_DITHER_DEPTH.*==\s+(\d+)", output)
+            m2 = re.search(r"FMT_TEMPORAL_DITHER_DEPTH.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m2 and idx in self.temporal_depth_vars:
-                depth_val = int(m2.group(1))
+                depth_val = int(m2.group(1), 0)
                 self.temporal_depth_vars[idx].set(self.DITHER_DEPTH_MAP.get(depth_val, "8-bit"))
 
-            m2 = re.search(r"FMT_TEMPORAL_DITHER_OFFSET.*==\s+(\d+)", output)
+            m2 = re.search(r"FMT_TEMPORAL_DITHER_OFFSET.*==\s*(0x[0-9a-fA-F]+|\d+)", output)
             if m2 and idx in self.temporal_offset_vars:
-                self.temporal_offset_vars[idx].set(int(m2.group(1)))
+                self.temporal_offset_vars[idx].set(int(m2.group(1), 0))
         except Exception:
             pass
 
