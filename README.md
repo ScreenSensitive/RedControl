@@ -64,17 +64,25 @@ All AMD GPUs with a DCN (Display Core Next) display engine:
 
 ### Installing UMR
 
+RedControl only uses umr's register CLI, so build it without the GUI and LLVM
+disassembler — that skips the LLVM and `libdrm_amdgpu` dependencies entirely.
+
 ```bash
 # Arch Linux
 yay -S umr-git
 
-# Ubuntu/Debian
-sudo apt install umr
+# Ubuntu / Debian / Mint — not in the repos, build from source:
+sudo apt install git cmake build-essential pkg-config \
+     libpciaccess-dev libdrm-dev libncurses-dev
 
-# From source
+# Fedora
+sudo dnf install git cmake gcc gcc-c++ make pkgconf-pkg-config \
+     libpciaccess-devel libdrm-devel ncurses-devel
+
+# then, on any distro:
 git clone https://gitlab.freedesktop.org/tomstdenis/umr.git
-cd umr && mkdir build && cd build
-cmake .. && make && sudo make install
+cd umr && cmake -S . -B build -DUMR_NO_GUI=ON -DUMR_NO_LLVM=ON
+make -C build -j"$(nproc)" && sudo make -C build install
 ```
 
 ## Usage
