@@ -21001,21 +21001,51 @@ class RedControl:
         add(f"authorised       : {bool(getattr(self, '_helper_authorized', False))}")
         add("")
 
-        add("FMT pipes")
+        add("Display pipes")
         add("-" * 58)
         pipes = self.read_all_fmt_pipes()
         if not pipes:
             add("  (could not read FMT registers)")
+
+        # Which connector each pipe drives, so a pipe is identifiable without
+        # cross-referencing the mapping section below.
+        pipe_conn = {}
+        for info in (getattr(self, 'active_outputs', {}) or {}).values():
+            if info.get('index') is not None and info.get('connector'):
+                pipe_conn[info['index']] = info['connector']
+
+        depths = {0: "6-bit", 1: "8-bit", 2: "10-bit", 3: "12-bit"}
+
+        def field(v, lo, hi=None):
+            hi = lo if hi is None else hi
+            return (v >> lo) & ((1 << (hi - lo + 1)) - 1)
+
+        def state(on, detail=""):
+            # Depth/mode selectors keep their value while a feature is off, so
+            # printing them unqualified reads as "it is doing 8-bit dithering"
+            # when it is doing nothing at all.
+            if on:
+                return "on" + (f"   ({detail})" if detail else "")
+            return "off" + (f"   ({detail}, not in use)" if detail else "")
+
         for idx in sorted(pipes):
             v = pipes[idx]
-            bits = {
-                'truncate': v >> 0 & 1, 'spatial': v >> 8 & 1,
-                'frame_rnd': v >> 13 & 1, 'rgb_rnd': v >> 14 & 1,
-                'highpass': v >> 15 & 1, 'temporal': v >> 16 & 1,
-            }
-            on = [k for k, b in bits.items() if b]
-            state = ", ".join(on) if on else "nothing enabled"
-            add(f"  FMT{idx}  0x{v:08X}   {state}")
+            conn = pipe_conn.get(idx)
+            label = f"{conn}" if conn else "no display attached"
+            add("")
+            add(f"  FMT{idx}  —  {label}      raw 0x{v:08X}")
+            add(f"      truncation        "
+                f"{state(field(v, 0), f'depth {depths[field(v, 4, 5)]}, mode ' + ('round' if field(v, 1) else 'truncate'))}")
+            add(f"      spatial dither    "
+                f"{state(field(v, 8), f'depth {depths[field(v, 11, 12)]}, mode {field(v, 9, 10)}')}")
+            add(f"      temporal dither   "
+                f"{state(field(v, 16), f'depth {depths[field(v, 17, 18)]}, offset {field(v, 21, 22)}')}")
+            add(f"      frame random      {state(field(v, 13))}")
+            add(f"      rgb noise         {state(field(v, 14))}")
+            add(f"      highpass random   {state(field(v, 15))}")
+            enabled = any(field(v, b) for b in self.FMT_ENABLE_BITS)
+            if conn:
+                add(f"      => {'dithering is active on this display' if enabled else 'clean output, no dithering'}")
         add("")
 
         add("Monitor -> pipe mapping")
