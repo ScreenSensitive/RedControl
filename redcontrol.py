@@ -19798,20 +19798,17 @@ class RedControl:
         menubar.add_cascade(label="Settings", menu=autostart_menu)
 
         autostart_enabled, points_here, _ = self.autostart_state()
+        autostart_menu.add_checkbutton(
+            label="Start on login",
+            onvalue=True, offvalue=False,
+            variable=self._autostart_menu_var(),
+            command=self.toggle_autostart)
         if autostart_enabled and not points_here:
             # The entry exists but launches a different copy of RedControl, so
-            # "Disable" would misrepresent what is actually set to run.
-            autostart_menu.add_command(label="Auto-Start: runs another copy — point it here",
+            # the checkmark alone would misrepresent what is set to run.
+            autostart_menu.add_command(label="   ↳ currently runs another copy — point it here",
                                        command=self.enable_autostart_and_refresh)
-            autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
-        elif autostart_enabled:
-            autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
-        else:
-            autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
 
-        # Passwordless access is gone: privileged work goes through
-        # redcontrol-helper under polkit. The only entry left is a way to clear
-        # the insecure rule older versions installed.
         autostart_menu.add_checkbutton(
             label="Auto-Apply saved settings on start",
             onvalue=True, offvalue=False,
@@ -19826,10 +19823,10 @@ class RedControl:
         autostart_menu.add_separator()
         autostart_menu.add_command(label="Diagnostics…", command=self.show_diagnostics)
         autostart_menu.add_separator()
-        autostart_menu.add_command(
-            label=("Ask for authentication each login"
-                   if self.polkit_rule_installed()
-                   else "Never ask for authentication on this machine"),
+        autostart_menu.add_checkbutton(
+            label="Never ask for authentication on this machine",
+            onvalue=True, offvalue=False,
+            variable=self._polkit_menu_var(),
             command=self.toggle_polkit_rule)
 
         if self.legacy_sudoers_present():
@@ -20591,6 +20588,15 @@ class RedControl:
     # binary, and it is confined to a local, active session.
 
     POLKIT_RULE = '/etc/polkit-1/rules.d/49-redcontrol.rules'
+
+    def _polkit_menu_var(self):
+        """Tk variable backing the authentication checkmark."""
+        var = getattr(self, '_polkit_var', None)
+        if var is None:
+            var = tk.BooleanVar()
+            self._polkit_var = var
+        var.set(self.polkit_rule_installed())
+        return var
 
     def polkit_rule_installed(self):
         return os.path.exists(self.POLKIT_RULE)
@@ -22588,6 +22594,23 @@ class RedControl:
     def auto_apply_enabled(self):
         return bool((self.load_settings() or {}).get('auto_apply', False))
 
+    def _autostart_menu_var(self):
+        """Tk variable backing the Auto-Start checkmark."""
+        var = getattr(self, '_autostart_var', None)
+        if var is None:
+            var = tk.BooleanVar()
+            self._autostart_var = var
+        var.set(self.is_autostart_enabled())
+        return var
+
+    def toggle_autostart(self):
+        """Flip auto-start, matching the checkbutton the user just clicked."""
+        if self.is_autostart_enabled():
+            self.disable_autostart()
+        else:
+            self.enable_autostart()
+        self.refresh_menubar()
+
     def _auto_apply_menu_var(self):
         """Tk variable backing the menu checkmark, seeded from the saved file."""
         var = getattr(self, '_auto_apply_var', None)
@@ -23024,15 +23047,14 @@ Restart this tool to detect UMR automatically.
 
         # Auto-Start section
         autostart_enabled, points_here, _ = self.autostart_state()
-
+        autostart_menu.add_checkbutton(
+            label="Start on login",
+            onvalue=True, offvalue=False,
+            variable=self._autostart_menu_var(),
+            command=self.toggle_autostart)
         if autostart_enabled and not points_here:
-            autostart_menu.add_command(label="Auto-Start: runs another copy — point it here",
+            autostart_menu.add_command(label="   ↳ currently runs another copy — point it here",
                                        command=self.enable_autostart_and_refresh)
-            autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
-        elif autostart_enabled:
-            autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
-        else:
-            autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
 
         autostart_menu.add_checkbutton(
             label="Auto-Apply saved settings on start",
@@ -23048,10 +23070,10 @@ Restart this tool to detect UMR automatically.
         autostart_menu.add_separator()
         autostart_menu.add_command(label="Diagnostics…", command=self.show_diagnostics)
         autostart_menu.add_separator()
-        autostart_menu.add_command(
-            label=("Ask for authentication each login"
-                   if self.polkit_rule_installed()
-                   else "Never ask for authentication on this machine"),
+        autostart_menu.add_checkbutton(
+            label="Never ask for authentication on this machine",
+            onvalue=True, offvalue=False,
+            variable=self._polkit_menu_var(),
             command=self.toggle_polkit_rule)
 
         if self.legacy_sudoers_present():
