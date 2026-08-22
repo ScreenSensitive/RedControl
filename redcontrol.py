@@ -20496,8 +20496,8 @@ class RedControl:
             return None
 
         console_print(f"DEBUG: helper {verb} -> rc={result.returncode} "
-                      f"out={(result.stdout or '').strip()[:80]!r} "
-                      f"err={(result.stderr or '').strip()[:80]!r}")
+                      f"out={(result.stdout or '').strip()[:600]!r} "
+                      f"err={(result.stderr or '').strip()[:200]!r}")
         if result.returncode == 0:
             # polkit's auth_admin_keep caches the authorisation for the rest of
             # the session, so background timers may now run without prompting.
@@ -25784,6 +25784,12 @@ sudo -n umr --version
                     result[field] = int(m.group(1), 0)
                 except ValueError:
                     pass
+        missing = [f for f in fields if f not in result]
+        if missing:
+            console_print(f"DEBUG: parse MISS {missing} in {reg_name}; "
+                          f"raw={output.strip()[:300]!r}")
+        else:
+            console_print(f"DEBUG: parse OK {reg_name} -> {result}")
         return result if result else None
 
     def detect_signal_encoders(self):
@@ -26927,15 +26933,6 @@ sudo -n umr --version
                 self.note_control_failure(idx, field, "could not read the register back")
                 return True  # cannot verify; leave the control as the user set it
 
-        var = (getattr(self, var_store, {}) or {}).get(idx) if var_store else None
-        if var is not None:
-            try:
-                if value_to_label is not None and actual is not None:
-                    var.set(value_to_label(int(actual)))
-                elif actual is not None:
-                    var.set(int(actual))
-            except Exception:
-                pass
         reason = "not authorised" if wrote is None else "the driver reset it immediately"
         self.note_control_failure(idx, field, reason)
         self.show_status(f"{label or field} did not take on {connector} — {reason}.",
@@ -27196,12 +27193,9 @@ sudo -n umr --version
             actual = check.get(bitfield)
 
         if wrote is None or (actual is not None and int(actual) != val):
-            var = (getattr(self, self.FIELD_TO_VAR.get(bitfield, ''), {}) or {}).get(idx)
-            if var is not None:
-                try:
-                    var.set(bool(actual) if actual is not None else (not value))
-                except Exception:
-                    pass
+            # Report, but leave the control where the user put it. Yanking it
+            # back mid-interaction is worse than a stale reading, and a
+            # read-back that disagrees is not always the write's fault.
             reason = ("not authorised" if wrote is None
                       else "the driver reset it immediately")
             self.note_control_failure(idx, bitfield, reason)
