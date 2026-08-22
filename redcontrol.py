@@ -19404,6 +19404,12 @@ class RedControl:
             self.root.after(1200, self.offer_legacy_sudoers_removal)
         except Exception:
             pass
+        # Reapply saved settings if the user asked for that. Runs after
+        # detection has populated the monitor tabs.
+        try:
+            self.root.after(1800, self.auto_apply_saved_settings)
+        except Exception:
+            pass
 
     def maybe_show_first_run(self):
         """Show a one-time 'use at your own risk' notice on first launch."""
@@ -19797,6 +19803,12 @@ class RedControl:
         # Passwordless access is gone: privileged work goes through
         # redcontrol-helper under polkit. The only entry left is a way to clear
         # the insecure rule older versions installed.
+        autostart_menu.add_checkbutton(
+            label="Auto-Apply saved settings on start",
+            onvalue=True, offvalue=False,
+            variable=self._auto_apply_menu_var(),
+            command=self.toggle_auto_apply)
+
         autostart_menu.add_separator()
         autostart_menu.add_command(
             label=("Ask for authentication each login"
@@ -22229,6 +22241,54 @@ class RedControl:
         canvas.bind("<B1-Motion>", lambda e: canvas.scan_dragto(e.x, e.y, gain=1))
         return inner
 
+    # ---- auto-apply saved settings at startup -------------------------------
+
+    def auto_apply_enabled(self):
+        return bool((self.load_settings() or {}).get('auto_apply', False))
+
+    def _auto_apply_menu_var(self):
+        """Tk variable backing the menu checkmark, seeded from the saved file."""
+        var = getattr(self, '_auto_apply_var', None)
+        if var is None:
+            var = tk.BooleanVar()
+            self._auto_apply_var = var
+        var.set(self.auto_apply_enabled())
+        return var
+
+    def toggle_auto_apply(self):
+        settings = self.load_settings() or {}
+        new_state = not settings.get('auto_apply', False)
+        settings['auto_apply'] = new_state
+        self.save_settings(settings)
+        if new_state:
+            messagebox.showinfo(
+                "Auto-Apply Enabled ✓",
+                "Your saved settings will be reapplied to each connected "
+                "monitor when RedControl starts.\n\n"
+                "Pair this with Auto-Start to have them restored at login.")
+        self.refresh_menubar()
+
+    def auto_apply_saved_settings(self):
+        """Reapply saved per-monitor settings. Called once at startup."""
+        if not self.auto_apply_enabled():
+            return
+        if os.geteuid() != 0 and not getattr(self, '_helper_authorized', False):
+            # Ask once, up front, rather than letting each write prompt.
+            if self.run_helper('enumerate') is None:
+                console_print("auto-apply skipped: not authorised")
+                return
+        applied = 0
+        for idx in sorted(self.connected_output_indices()):
+            connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx)
+            try:
+                self.restore_monitor_settings(idx, connector)
+                applied += 1
+            except Exception as exc:
+                self.log_debug(f"auto-apply FMT{idx} failed: {exc}")
+        if applied:
+            self.show_status(f"Auto-applied saved settings to {applied} monitor(s).",
+                             "success")
+
     def sync_current_tab_from_hw(self):
         """Re-read the visible monitor's registers into its controls.
 
@@ -22580,6 +22640,12 @@ Restart this tool to detect UMR automatically.
             autostart_menu.add_command(label="Disable Auto-Start", command=self.disable_autostart_and_refresh)
         else:
             autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
+
+        autostart_menu.add_checkbutton(
+            label="Auto-Apply saved settings on start",
+            onvalue=True, offvalue=False,
+            variable=self._auto_apply_menu_var(),
+            command=self.toggle_auto_apply)
 
         autostart_menu.add_separator()
         autostart_menu.add_command(
@@ -24145,58 +24211,104 @@ sudo -n umr --version
         # Save initial hardware state
         self.root.after(150, lambda: self.refresh_status(idx, save_initial=True))
 
-    def apply_dithering_to_all(self, source_fmt_idx):
-        """Apply current dithering toggle states to all other active outputs."""
-        try:
-            # Source states
-            src_spatial = self.spatial_vars.get(source_fmt_idx).get() if source_fmt_idx in getattr(self, 'spatial_vars', {}) else None
-            src_temporal = self.temporal_vars.get(source_fmt_idx).get() if source_fmt_idx in getattr(self, 'temporal_vars', {}) else None
-            src_rgb = self.rgb_random_vars.get(source_fmt_idx).get() if source_fmt_idx in getattr(self, 'rgb_random_vars', {}) else None
-            src_hp = self.highpass_random_vars.get(source_fmt_idx).get() if source_fmt_idx in getattr(self, 'highpass_random_vars', {}) else None
-            src_frame = self.frame_random_vars.get(source_fmt_idx).get() if source_fmt_idx in getattr(self, 'frame_random_vars', {}) else None
+    def connected_output_indices(self):
+        """Output indices with a monitor actually attached.
 
-            targets = set()
-            for d in (
-                getattr(self, 'spatial_vars', {}),
-                getattr(self, 'temporal_vars', {}),
-                getattr(self, 'rgb_random_vars', {}),
-                getattr(self, 'highpass_random_vars', {}),
-                getattr(self, 'frame_random_vars', {}),
-            ):
-                if isinstance(d, dict):
-                    targets.update(d.keys())
+        The widget dictionaries keep entries for outputs that were detected at
+        some point, so iterating them can target pipes with nothing plugged in.
+        The notebook only holds tabs for live monitors, so use its mapping.
+        """
+        idxs = set()
+        mapping = getattr(self, 'tab_id_to_output_idx', {}) or {}
+        try:
+            for tab in self.notebook.tabs():
+                idx = mapping.get(str(tab))
+                if idx is not None:
+                    idxs.add(idx)
+        except Exception:
+            pass
+        if not idxs:
+            # Fall back to whatever detection recorded as active.
+            for key in (getattr(self, 'active_outputs', {}) or {}):
+                if key.startswith('FMT'):
+                    try:
+                        idxs.add(int(key[3:]))
+                    except ValueError:
+                        pass
+        return idxs
+
+    def sync_dithering_to_all_monitors(self, source_fmt_idx):
+        """Copy this output's full dither configuration to every connected one.
+
+        Previously this copied only the five enable toggles, leaving each
+        monitor's depth, mode and offset untouched -- so "apply to all" left
+        the other monitors dithering differently from the one you copied from.
+        The dropdown values are applied first so that enabling a mode never
+        briefly runs it at another monitor's old depth.
+        """
+        try:
+            def var_get(store, idx):
+                d = getattr(self, store, {}) or {}
+                v = d.get(idx)
+                try:
+                    return v.get() if v is not None else None
+                except Exception:
+                    return None
+
+            toggles = [
+                ('spatial_vars', 'FMT_SPATIAL_DITHER_EN'),
+                ('temporal_vars', 'FMT_TEMPORAL_DITHER_EN'),
+                ('rgb_random_vars', 'FMT_RGB_RANDOM_ENABLE'),
+                ('highpass_random_vars', 'FMT_HIGHPASS_RANDOM_ENABLE'),
+                ('frame_random_vars', 'FMT_FRAME_RANDOM_ENABLE'),
+                ('truncate_vars', 'FMT_TRUNCATE_EN'),
+            ]
+            dropdowns = [
+                ('spatial_depth_vars', 'set_spatial_depth'),
+                ('spatial_mode_vars', 'set_spatial_mode'),
+                ('temporal_depth_vars', 'set_temporal_depth'),
+                ('temporal_offset_vars', 'set_temporal_offset'),
+                ('truncate_depth_vars', 'set_truncate_depth'),
+                ('truncate_mode_vars', 'set_truncate_mode'),
+            ]
+
+            src_toggles = {store: var_get(store, source_fmt_idx) for store, _ in toggles}
+            src_drops = {store: var_get(store, source_fmt_idx) for store, _ in dropdowns}
+
+            targets = self.connected_output_indices() - {source_fmt_idx}
+            if not targets:
+                self.show_status("No other connected monitors to sync to.", "info")
+                return
 
             for tgt in sorted(targets):
-                if tgt == source_fmt_idx:
-                    continue
+                for store, setter_name in dropdowns:
+                    val = src_drops.get(store)
+                    d = getattr(self, store, {}) or {}
+                    if val is None or tgt not in d:
+                        continue
+                    try:
+                        d[tgt].set(val)
+                        getattr(self, setter_name)(tgt, val)
+                    except Exception as exc:
+                        self.log_debug(f"sync {store} -> FMT{tgt} failed: {exc}")
 
-                if src_spatial is not None and tgt in self.spatial_vars:
-                    self.spatial_vars[tgt].set(src_spatial)
-                    self.toggle_setting(tgt, 'FMT_SPATIAL_DITHER_EN', src_spatial)
+                for store, field in toggles:
+                    val = src_toggles.get(store)
+                    d = getattr(self, store, {}) or {}
+                    if val is None or tgt not in d:
+                        continue
+                    try:
+                        d[tgt].set(val)
+                        self.toggle_setting(tgt, field, val)
+                    except Exception as exc:
+                        self.log_debug(f"sync {field} -> FMT{tgt} failed: {exc}")
 
-                if src_temporal is not None and tgt in self.temporal_vars:
-                    self.temporal_vars[tgt].set(src_temporal)
-                    self.toggle_setting(tgt, 'FMT_TEMPORAL_DITHER_EN', src_temporal)
-
-                if src_rgb is not None and tgt in self.rgb_random_vars:
-                    self.rgb_random_vars[tgt].set(src_rgb)
-                    self.toggle_setting(tgt, 'FMT_RGB_RANDOM_ENABLE', src_rgb)
-
-                if src_hp is not None and tgt in self.highpass_random_vars:
-                    self.highpass_random_vars[tgt].set(src_hp)
-                    self.toggle_setting(tgt, 'FMT_HIGHPASS_RANDOM_ENABLE', src_hp)
-
-                if src_frame is not None and tgt in self.frame_random_vars:
-                    self.frame_random_vars[tgt].set(src_frame)
-                    self.toggle_setting(tgt, 'FMT_FRAME_RANDOM_ENABLE', src_frame)
-
-            try:
-                self.status_var.set("Applied dithering settings to all outputs")
-            except Exception:
-                pass
+            self.show_status(
+                f"Synced dither settings to {len(targets)} other connected "
+                f"monitor{'s' if len(targets) != 1 else ''}.", "success")
         except Exception as e:
             try:
-                self.status_var.set(f"Apply to all failed: {e}")
+                self.status_var.set(f"Sync to all failed: {e}")
             except Exception:
                 pass
 
@@ -24360,8 +24472,8 @@ sudo -n umr --version
 
         apply_btn = tk.Button(
             apply_row,
-            text="Apply to all monitors",
-            command=lambda i=idx: self.apply_dithering_to_all(i),
+            text="Sync settings to all connected monitors",
+            command=lambda i=idx: self.sync_dithering_to_all_monitors(i),
             bg=self.theme.get("btn", self.accent),
             fg=self.theme.get("btn_fg", "white"),
             activebackground=self.theme.get("btn_active", self.theme.get("btn", self.accent)),
