@@ -17,6 +17,7 @@ import glob
 import shutil
 import base64
 import io
+import types
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -19368,7 +19369,7 @@ class RedControl:
         self.initial_values = {}  # Store hardware state at startup
         self.tray_icon = None
         self.tray_failed = False  # Track if tray initialization failed
-        self.passwordless_just_enabled = False  # Track if passwordless was just enabled in this session
+        self._helper_authorized = False  # True once polkit has authorised us this session
 
         # Settings persistence
         self.settings_dir = Path.home() / '.config' / 'redcontrol'
@@ -19395,6 +19396,11 @@ class RedControl:
         # one-time safety disclaimer on first run
         try:
             self.root.after(600, self.maybe_show_first_run)
+        except Exception:
+            pass
+        # Offer to clear the passwordless sudo rule older versions installed.
+        try:
+            self.root.after(1200, self.offer_legacy_sudoers_removal)
         except Exception:
             pass
 
@@ -19781,14 +19787,13 @@ class RedControl:
         else:
             autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
 
-        autostart_menu.add_separator()
-        passwordless_enabled = self.is_passwordless_enabled()
-        if passwordless_enabled:
-            autostart_menu.add_command(label="Disable Passwordless Access",
-                                       command=self.disable_passwordless_and_refresh)
-        else:
-            autostart_menu.add_command(label="Enable Passwordless Access",
-                                       command=self.enable_passwordless_and_refresh)
+        # Passwordless access is gone: privileged work goes through
+        # redcontrol-helper under polkit. The only entry left is a way to clear
+        # the insecure rule older versions installed.
+        if self.legacy_sudoers_present():
+            autostart_menu.add_separator()
+            autostart_menu.add_command(label="Remove Old Passwordless Rule (insecure)",
+                                       command=self.remove_legacy_and_refresh)
         # Theme options removed - use the moon/sun button instead
         # ---------------------------
         # Layout: Sidebar + Content
@@ -20376,469 +20381,185 @@ class RedControl:
                  font=("Arial", 10, "bold"),
                  padx=20, pady=8).pack(side=tk.LEFT, padx=5)
 
-    def check_sudo_cached(self):
-        """Check if sudo password is cached OR passwordless is enabled (no prompt needed)"""
-        # If we just enabled passwordless in this session, assume it works
-        if self.passwordless_just_enabled:
-            return True
+    # ---- privileged operations ---------------------------------------------
+    # Every root operation goes through redcontrol-helper, which exposes a
+    # fixed set of verbs and builds the umr command line itself. RedControl
+    # never sends a umr argument list across the privilege boundary: umr can
+    # write arbitrary MMIO registers and arbitrary GPU virtual memory
+    # (--vm-write reaches GTT-mapped system RAM), so a passwordless grant on
+    # "umr *" is equivalent to handing out a root shell. Authorisation is
+    # polkit's job now, not a file in /etc/sudoers.d.
+
+    HELPER_CANDIDATES = ('/usr/libexec/redcontrol-helper',
+                         '/usr/local/libexec/redcontrol-helper')
+    LEGACY_SUDOERS = '/etc/sudoers.d/umr-passwordless'
+
+    def helper_path(self):
+        """Absolute path to the privileged helper, or None if not installed."""
+        cached = getattr(self, '_helper_path_cache', None)
+        if cached:
+            return cached
+        for path in self.HELPER_CANDIDATES:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                self._helper_path_cache = path
+                return path
+        # Running from a git checkout that has not been installed yet.
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'redcontrol-helper')
+        if os.path.isfile(local):
+            self._helper_path_cache = local
+            return local
+        return None
+
+    def run_helper(self, verb, *args, timeout=20):
+        """Run a single helper verb. Returns stdout, or None on failure."""
+        helper = self.helper_path()
+        if helper is None:
+            self.report_helper_missing()
+            return None
+
+        argv = [helper, verb] + [str(a) for a in args]
+        if os.geteuid() != 0:
+            if shutil.which('pkexec'):
+                argv = ['pkexec'] + argv
+            else:
+                # No polkit here. Fall back to sudo: the helper is a single
+                # command with no wildcard, so even a NOPASSWD rule for it
+                # grants nothing beyond the verbs above.
+                argv = ['sudo'] + argv
 
         try:
-            # Test if we can run /usr/bin/true without password
-            # This is included in the sudoers file when passwordless is enabled
-            # Also works for cached sudo password
-            result = subprocess.run(['sudo', '-n', '/usr/bin/true'],
-                                  capture_output=True,
-                                  timeout=0.5)
-            # If returncode is 0, sudo worked (cached or passwordless)
-            return result.returncode == 0
+            result = subprocess.run(argv, capture_output=True, text=True,
+                                    timeout=timeout, errors='replace')
         except subprocess.TimeoutExpired:
-            # Timeout means it's waiting for password (password required)
-            return False
-        except Exception:
-            return False
+            console_print(f"helper timed out: {verb}")
+            return None
+        except Exception as exc:
+            console_print(f"helper failed to start: {exc}")
+            return None
 
-    def is_passwordless_enabled(self):
-        """Check if passwordless sudo is enabled for UMR"""
+        if result.returncode == 0:
+            # polkit's auth_admin_keep caches the authorisation for the rest of
+            # the session, so background timers may now run without prompting.
+            self._helper_authorized = True
+            return result.stdout
+        if result.returncode in (126, 127):
+            # pkexec: dismissed dialog, or not authorised.
+            console_print("authorisation dismissed or denied")
+            return None
+        console_print(f"helper {verb} failed (rc={result.returncode}): "
+                      f"{result.stderr.strip()}")
+        return None
+
+    def read_debugfs(self, path):
+        """Read one file under /sys/kernel/debug/dri. Returns text or None.
+
+        Tries an unprivileged read first -- debugfs is occasionally reachable
+        without root -- and only then goes through the helper, which validates
+        the path server-side before opening it.
+        """
         try:
-            # Can't check if file exists due to directory permissions
-            # Instead, test if sudo works without password
-            # We added /usr/bin/true to sudoers specifically for this test
+            with open(path, 'r', errors='replace') as fh:
+                return fh.read()
+        except PermissionError:
+            pass
+        except OSError:
+            return None
+        return self.run_helper('read-debugfs', path)
+
+    def list_debugfs(self, name=None, contains=None):
+        """List debugfs files, optionally filtered. CompletedProcess-shaped.
+
+        Uses glob when debugfs happens to be readable, otherwise the helper,
+        which walks the tree in-process. find(1) is never run with privileges:
+        its -exec option turns any such grant into a root shell.
+        """
+        paths = []
+        try:
+            paths = [p for p in glob.glob('/sys/kernel/debug/dri/**/*',
+                                          recursive=True) if os.path.isfile(p)]
+        except OSError:
+            paths = []
+        if not paths:
+            out = self.run_helper('list-debugfs')
+            if out is None:
+                return types.SimpleNamespace(returncode=1, stdout='', stderr='')
+            paths = [p for p in out.split('\n') if p.strip()]
+
+        if name:
+            paths = [p for p in paths if os.path.basename(p) == name]
+        if contains:
+            paths = [p for p in paths if contains in p]
+        return types.SimpleNamespace(returncode=0 if paths else 1,
+                                     stdout='\n'.join(paths), stderr='')
+
+    def _debugfs_result(self, path):
+        """read_debugfs() shaped like a CompletedProcess for existing callers."""
+        text = self.read_debugfs(path)
+        return types.SimpleNamespace(returncode=0 if text is not None else 1,
+                                     stdout=text or '',
+                                     stderr='')
+
+    def report_helper_missing(self):
+        if getattr(self, '_helper_warned', False):
+            return
+        self._helper_warned = True
+        messagebox.showerror(
+            "Helper not installed",
+            "redcontrol-helper is not installed, so RedControl cannot reach "
+            "the GPU.\n\n"
+            "Run ./install.sh from the RedControl directory to install it.")
+
+    # ---- migration away from the old sudoers grant --------------------------
+
+    def legacy_sudoers_present(self):
+        """True if the pre-1.1 passwordless rule is still installed.
+
+        /etc/sudoers.d is not readable by normal users, so probe it the way
+        sudo would: the old rule permitted /usr/bin/true without a password.
+        """
+        try:
             result = subprocess.run(['sudo', '-n', '/usr/bin/true'],
-                                  capture_output=True,
-                                  timeout=0.5)
-            # If returncode is 0, passwordless is enabled
+                                    capture_output=True, timeout=1)
             return result.returncode == 0
         except Exception:
             return False
 
-    def enable_passwordless_access(self):
-        """Enable passwordless sudo for UMR (prompts for password in GUI)"""
+    def offer_legacy_sudoers_removal(self):
+        """Offer to remove the old grant. Called once at startup."""
+        if not self.legacy_sudoers_present():
+            return
+        if not messagebox.askyesno(
+                "Insecure setting found",
+                "An earlier version of RedControl added a passwordless sudo "
+                "rule so it could reach the GPU.\n\n"
+                "That rule also let find, cat and mount run as root, which "
+                "allows any program running as you to obtain a root shell. "
+                "RedControl no longer needs it.\n\n"
+                "Remove it now? You will be asked for your password."):
+            return
+        self.remove_legacy_sudoers()
+
+    def remove_legacy_sudoers(self):
+        argv = ['pkexec'] if shutil.which('pkexec') else ['sudo']
+        argv += ['rm', '-f', self.LEGACY_SUDOERS]
         try:
-            # Show GUI password dialog
-            password = self.show_simple_password_dialog(
-                "Enable Passwordless Access",
-                "Enter your password to enable passwordless access for GPU controls:"
-            )
-
-            if password is None:
-                # User cancelled
-                return False
-
-            username = os.getenv('USER')
-
-            # Find UMR path
-            umr_path = shutil.which('umr') or '/usr/local/bin/umr'
-
-            # Create sudoers content
-            # Include /usr/bin/true so we can test if passwordless is working
-            # Include /usr/bin/cat so we can read debugfs files (colorspace, etc)
-            # Include mount/mountpoint/mkdir for automatic debugfs mounting
-            # Include find to locate debugfs files
-            sudoers_content = f"""# RedControl - Passwordless UMR access
-# Created by user request from GUI
-{username} ALL=(root) NOPASSWD: {umr_path}
-{username} ALL=(root) NOPASSWD: {umr_path} *
-{username} ALL=(root) NOPASSWD: /usr/bin/true
-{username} ALL=(root) NOPASSWD: /usr/bin/cat
-{username} ALL=(root) NOPASSWD: /usr/bin/cat *
-{username} ALL=(root) NOPASSWD: /usr/bin/mount
-{username} ALL=(root) NOPASSWD: /usr/bin/mount *
-{username} ALL=(root) NOPASSWD: /usr/bin/mountpoint
-{username} ALL=(root) NOPASSWD: /usr/bin/mountpoint *
-{username} ALL=(root) NOPASSWD: /usr/bin/mkdir
-{username} ALL=(root) NOPASSWD: /usr/bin/mkdir *
-{username} ALL=(root) NOPASSWD: /usr/bin/find
-{username} ALL=(root) NOPASSWD: /usr/bin/find *
-"""
-
-            # Write to temp file
-            temp_file = '/tmp/umr-passwordless-sudoers'
-            with open(temp_file, 'w') as f:
-                f.write(sudoers_content)
-
-            # Run installation with GUI-provided password
-            result = subprocess.run(['sudo', '-S', '-p', '', 'install', '-m', '0440', temp_file,
-                                   '/etc/sudoers.d/umr-passwordless'],
-                                  input=password + '\n',
-                                  capture_output=True, text=True)
-
-            if result.returncode == 0:
-                # Verify syntax
-                verify = subprocess.run(['sudo', '-S', '-p', '', 'visudo', '-c', '-f',
-                                       '/etc/sudoers.d/umr-passwordless'],
-                                      input=password + '\n',
-                                      capture_output=True, text=True)
-
-                if verify.returncode == 0:
-                    # Mark that passwordless was just enabled
-                    self.passwordless_just_enabled = True
-
-                    messagebox.showinfo(
-                        "Passwordless Access Enabled ✓",
-                        "You will no longer be asked for your password when accessing GPU controls!\n\n"
-                        "This setting can be disabled anytime from:\n"
-                        "Auto-Start → Disable Passwordless Access"
-                    )
-                    return True
-                else:
-                    # Syntax error, remove file
-                    subprocess.run(['sudo', '-S', '-p', '', 'rm', '/etc/sudoers.d/umr-passwordless'],
-                                 input=password + '\n',
-                                 capture_output=True)
-                    messagebox.showerror("Error",
-                                       "Failed to enable passwordless access.\n"
-                                       "Sudoers syntax error.")
-                    return False
-            else:
-                messagebox.showerror("Error",
-                                   f"Failed to enable passwordless access:\n{result.stderr}")
-                return False
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            messagebox.showerror("Error",
-                               f"Failed to enable passwordless access:\n{e}")
+            result = subprocess.run(argv, capture_output=True, text=True,
+                                    timeout=120)
+        except Exception as exc:
+            messagebox.showerror("Error", f"Could not remove the rule:\n{exc}")
             return False
-        finally:
-            # Clean up temp file
-            try:
-                os.remove('/tmp/umr-passwordless-sudoers')
-            except Exception:
-                pass
-
-    def enable_passwordless_access_with_password(self, password):
-        """Enable passwordless sudo for UMR using provided password"""
-        console_print("DEBUG: enable_passwordless_access_with_password called")
-        try:
-            username = os.getenv('USER')
-            console_print(f"DEBUG: Username = {username}")
-
-            # Find UMR path
-            umr_path = shutil.which('umr') or '/usr/local/bin/umr'
-            console_print(f"DEBUG: UMR path = {umr_path}")
-
-            # Create sudoers content
-            # Include /usr/bin/true so we can test if passwordless is working
-            # Include /usr/bin/cat so we can read debugfs files (colorspace, etc)
-            # Include mount/mountpoint/mkdir for automatic debugfs mounting
-            # Include find to locate debugfs files
-            sudoers_content = f"""# RedControl - Passwordless UMR access
-# Created by user request from GUI
-{username} ALL=(root) NOPASSWD: {umr_path}
-{username} ALL=(root) NOPASSWD: {umr_path} *
-{username} ALL=(root) NOPASSWD: /usr/bin/true
-{username} ALL=(root) NOPASSWD: /usr/bin/cat
-{username} ALL=(root) NOPASSWD: /usr/bin/cat *
-{username} ALL=(root) NOPASSWD: /usr/bin/mount
-{username} ALL=(root) NOPASSWD: /usr/bin/mount *
-{username} ALL=(root) NOPASSWD: /usr/bin/mountpoint
-{username} ALL=(root) NOPASSWD: /usr/bin/mountpoint *
-{username} ALL=(root) NOPASSWD: /usr/bin/mkdir
-{username} ALL=(root) NOPASSWD: /usr/bin/mkdir *
-{username} ALL=(root) NOPASSWD: /usr/bin/find
-{username} ALL=(root) NOPASSWD: /usr/bin/find *
-"""
-
-            # Write to temp file
-            temp_file = '/tmp/umr-passwordless-sudoers'
-            with open(temp_file, 'w') as f:
-                f.write(sudoers_content)
-            console_print(f"DEBUG: Wrote temp file to {temp_file}")
-
-            # Run installation with password via stdin
-            console_print("DEBUG: Running sudo install command...")
-            result = subprocess.run(['sudo', '-S', '-p', '', 'install', '-m', '0440', temp_file,
-                                   '/etc/sudoers.d/umr-passwordless'],
-                                  input=password + '\n',
-                                  capture_output=True, text=True)
-
-            console_print(f"DEBUG: Install returncode = {result.returncode}")
-            console_print(f"DEBUG: Install stdout = {result.stdout}")
-            console_print(f"DEBUG: Install stderr = {result.stderr}")
-
-            if result.returncode == 0:
-                # Verify syntax with password
-                console_print("DEBUG: Running visudo verify...")
-                verify = subprocess.run(['sudo', '-S', '-p', '', 'visudo', '-c', '-f',
-                                       '/etc/sudoers.d/umr-passwordless'],
-                                      input=password + '\n',
-                                      capture_output=True, text=True)
-
-                console_print(f"DEBUG: Visudo returncode = {verify.returncode}")
-                console_print(f"DEBUG: Visudo stdout = {verify.stdout}")
-                console_print(f"DEBUG: Visudo stderr = {verify.stderr}")
-
-                if verify.returncode == 0:
-                    console_print("DEBUG: Success! Showing success message")
-
-                    # Mark that passwordless was just enabled in this session
-                    self.passwordless_just_enabled = True
-
-                    # Final verification - does the file actually exist?
-                    # Note: May fail due to directory permissions, but that's OK
-                    try:
-                        if os.path.exists('/etc/sudoers.d/umr-passwordless'):
-                            console_print("DEBUG: ✅ VERIFIED: File exists at /etc/sudoers.d/umr-passwordless")
-                        else:
-                            console_print("DEBUG: ❌ WARNING: File does NOT exist at /etc/sudoers.d/umr-passwordless")
-                    except Exception:
-                        console_print("DEBUG: Could not verify file (permission denied on directory)")
-
-                    messagebox.showinfo(
-                        "Passwordless Access Enabled ✓",
-                        "You will no longer be asked for your password when accessing GPU controls!\n\n"
-                        "This setting can be disabled anytime from:\n"
-                        "Auto-Start → Disable Passwordless Access"
-                    )
-                    return True
-                else:
-                    # Syntax error, remove file
-                    console_print("DEBUG: Visudo failed, removing file")
-                    subprocess.run(['sudo', '-S', '-p', '', 'rm', '/etc/sudoers.d/umr-passwordless'],
-                                 input=password + '\n',
-                                 capture_output=True)
-                    messagebox.showerror("Error",
-                                       "Failed to enable passwordless access.\n"
-                                       "Sudoers syntax error.")
-                    return False
-            else:
-                console_print("DEBUG: Install command failed")
-                messagebox.showerror("Error",
-                                   f"Failed to enable passwordless access:\n{result.stderr}")
-                return False
-
-        except Exception as e:
-            console_print(f"DEBUG: Exception occurred: {e}")
-            import traceback
-            traceback.print_exc()
-            messagebox.showerror("Error",
-                               f"Failed to enable passwordless access:\n{e}")
-            return False
-        finally:
-            # Clean up temp file
-            try:
-                os.remove('/tmp/umr-passwordless-sudoers')
-                console_print("DEBUG: Cleaned up temp file")
-            except Exception as e:
-                console_print(f"DEBUG: Failed to clean up temp file: {e}")
-            except Exception:
-                pass
-
-    def disable_passwordless_access(self):
-        """Disable passwordless sudo for UMR"""
-        try:
-            # Show simple password dialog
-            password = self.show_simple_password_dialog("Disable Passwordless Access",
-                                                        "Enter your password to disable passwordless access:")
-
-            if password is None:
-                # User cancelled
-                return False
-
-            # Remove the sudoers file using provided password
-            result = subprocess.run(['sudo', '-S', '-p', '', 'rm', '-f', '/etc/sudoers.d/umr-passwordless'],
-                                  input=password + '\n',
-                                  capture_output=True, text=True)
-
-            console_print(f"DEBUG: Disable passwordless returncode = {result.returncode}")
-            console_print(f"DEBUG: Disable passwordless stderr = {result.stderr}")
-
-            if result.returncode == 0:
-                # Mark that passwordless is no longer enabled
-                self.passwordless_just_enabled = False
-
-                # Clear sudo cache to force re-check
-                subprocess.run(['sudo', '-k'], capture_output=True)
-
-                messagebox.showinfo(
-                    "Passwordless Access Disabled ✓",
-                    "Password will now be required when accessing GPU controls."
-                )
-                return True
-            else:
-                messagebox.showerror("Error",
-                                   f"Failed to disable passwordless access:\n{result.stderr}")
-                return False
-        except Exception as e:
-            console_print(f"DEBUG: Exception disabling passwordless: {e}")
-            import traceback
-            traceback.print_exc()
-            messagebox.showerror("Error",
-                               f"Failed to disable passwordless access:\n{e}")
-            return False
-
-    def show_simple_password_dialog(self, title, message):
-        """Show simple password dialog - returns password or None if cancelled"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title(title)
-        dialog.geometry("700x462")  # 5% shorter
-        dialog.resizable(True, True)
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        # Center dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (700 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (462 // 2)
-        dialog.geometry(f"+{x}+{y}")
-
-        # Main frame with minimal padding
-        main_frame = tk.Frame(dialog, padx=40, pady=22)
-        main_frame.pack(fill='both', expand=True)
-
-        # Icon - smaller
-        icon_label = tk.Label(main_frame, text="🔐", font=("Arial", 38))
-        icon_label.pack(pady=(0, 12))
-
-        # Message
-        msg_label = tk.Label(main_frame, text=message, wraplength=550, font=("Arial", 9))
-        msg_label.pack(pady=(0, 18))
-
-        # Password field
-        pass_frame = tk.Frame(main_frame)
-        pass_frame.pack(fill='x', pady=(0, 18))
-
-        tk.Label(pass_frame, text="Password:", width=10, anchor='w',
-                font=("Arial", 9)).pack(side='left')
-        password_var = tk.StringVar()
-        password_entry = tk.Entry(pass_frame, textvariable=password_var,
-                                  show="●", width=40, font=("Arial", 10))
-        password_entry.pack(side='left', fill='x', expand=True, padx=(10, 0))
-        password_entry.focus_set()
-
-        # Result storage
-        result = {'password': None}
-
-        # Spacer to push buttons down
-        spacer = tk.Frame(main_frame, height=25)
-        spacer.pack(fill='both', expand=True)
-
-        # Buttons at bottom
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill='x', pady=(18, 5), side='bottom')
-
-        def on_ok():
-            result['password'] = password_var.get()
-            dialog.destroy()
-
-        def on_cancel():
-            result['password'] = None
-            dialog.destroy()
-
-        cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel,
-                              padx=28, pady=8, font=("Arial", 9))
-        cancel_btn.pack(side='right', padx=(8, 0))
-
-        ok_btn = tk.Button(button_frame, text="OK", command=on_ok,
-                          bg="#4CAF50", fg="white", padx=28, pady=8,
-                          font=("Arial", 9, "bold"))
-        ok_btn.pack(side='right')
-
-        # Bind Enter key
-        password_entry.bind('<Return>', lambda e: on_ok())
-
-        # Wait for dialog to close
-        self.root.wait_window(dialog)
-
-        return result['password']
-
-    def show_password_dialog(self):
-        """Show GUI password prompt for sudo"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Authentication Required")
-        dialog.geometry("750x440")
-        dialog.resizable(True, True)  # ALLOW RESIZING!
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        # Center dialog
-        dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (750 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (440 // 2)
-        dialog.geometry(f"+{x}+{y}")
-
-        # Main frame
-        main_frame = tk.Frame(dialog, padx=25, pady=25)
-        main_frame.pack(fill='both', expand=True)
-
-        # Icon and message
-        msg_frame = tk.Frame(main_frame)
-        msg_frame.pack(fill='x', pady=(0, 20))
-
-        # Lock icon (Unicode)
-        icon_label = tk.Label(msg_frame, text="🔐", font=("Arial", 36))
-        icon_label.pack(side='left', padx=(0, 20))
-
-        # Message
-        msg_label = tk.Label(msg_frame,
-                            text="RedControl needs to access GPU registers.\n\n"
-                                 "Please enter your password to continue.",
-                            justify='left', wraplength=600, font=("Arial", 11))
-        msg_label.pack(side='left', anchor='w')
-
-        # Password field
-        pass_frame = tk.Frame(main_frame)
-        pass_frame.pack(fill='x', pady=(0, 20))
-
-        tk.Label(pass_frame, text="Password:", width=12, anchor='w',
-                font=("Arial", 11)).pack(side='left')
-        password_var = tk.StringVar()
-        password_entry = tk.Entry(pass_frame, textvariable=password_var,
-                                  show="●", width=40, font=("Arial", 12))
-        password_entry.pack(side='left', fill='x', expand=True, padx=(5, 0))
-        password_entry.focus_set()
-
-        # Result storage
-        result = {'password': None, 'cancelled': False}
-
-        # Passwordless checkbox (BEFORE buttons so it's always visible)
-        passwordless_var = tk.BooleanVar(value=False)
-        console_print(f"DEBUG: Created passwordless_var with initial value: {passwordless_var.get()}")
-        passwordless_frame = tk.Frame(main_frame)
-        passwordless_frame.pack(fill='x', pady=(0, 15))
-
-        passwordless_check = tk.Checkbutton(
-            passwordless_frame,
-            text="Don't ask for password again",
-            variable=passwordless_var,
-            font=("Arial", 11)
-        )
-        passwordless_check.pack(anchor='w')
-        console_print(f"DEBUG: Checkbox created, current value: {passwordless_var.get()}")
-
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill='x')
-
-        def on_ok():
-            result['password'] = password_var.get()
-            dialog.destroy()
-
-        def on_cancel():
-            result['cancelled'] = True
-            dialog.destroy()
-
-        ok_btn = tk.Button(button_frame, text="Authenticate", command=on_ok,
-                          bg="#4CAF50", fg="white", padx=30, pady=10,
-                          font=("Arial", 11, "bold"))
-        ok_btn.pack(side='right', padx=(5, 0))
-
-        cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel,
-                              padx=30, pady=10, font=("Arial", 11))
-        cancel_btn.pack(side='right')
-
-        # Bind Enter key
-        password_entry.bind('<Return>', lambda e: on_ok())
-
-        # Wait for dialog to close
-        self.root.wait_window(dialog)
-
-        # Get the checkbox value
-        result['enable_passwordless'] = passwordless_var.get()
-        console_print(f"DEBUG: Password dialog closed. enable_passwordless={result['enable_passwordless']}")
-
-        return result
+        if result.returncode == 0:
+            subprocess.run(['sudo', '-k'], capture_output=True)
+            messagebox.showinfo(
+                "Removed",
+                "The passwordless sudo rule has been removed.")
+            return True
+        messagebox.showerror(
+            "Error",
+            "Could not remove the rule. Remove it by hand with:\n\n"
+            f"    sudo rm {self.LEGACY_SUDOERS}")
+        return False
 
     def _get_xrandr_props(self, max_age=1.5):
         """Cached `xrandr --props` output — collapses a page render's many
@@ -20856,86 +20577,44 @@ class RedControl:
         return out
 
     def run_umr_command(self, args):
-        """Run UMR command with sudo if not already root"""
-        try:
-            # Check if we're already root
-            if os.geteuid() == 0:
-                # Already root, run directly
-                cmd = ["umr"] + args
-                result = subprocess.run(cmd, capture_output=True,
-                                      text=True, timeout=5, errors='replace')
-                return result.stdout
-            else:
-                # Not root, need sudo
-                # Check if sudo is cached (no password needed)
-                if self.check_sudo_cached():
-                    # Password cached, just run with sudo
-                    cmd = ["sudo", "umr"] + args
-                    result = subprocess.run(cmd, capture_output=True,
-                                          text=True, timeout=5, errors='replace')
-                    return result.stdout
-                else:
-                    # Need to ask for password - show GUI dialog
-                    auth_result = self.show_password_dialog()
+        """Translate a umr argument list into a redcontrol-helper verb.
 
-                    if auth_result['cancelled']:
-                        # User cancelled
-                        messagebox.showwarning("Authentication Cancelled",
-                                             "GPU access requires authentication.\n"
-                                             "Operation cancelled.")
-                        return None
+        Call sites still speak umr's argument syntax, but nothing here reaches
+        umr directly any more. The arguments are matched against the fixed set
+        of shapes RedControl actually uses, and the helper rebuilds the command
+        line itself as root. An invocation that does not match a known shape is
+        refused rather than forwarded, so a bug elsewhere in the GUI cannot turn
+        into an arbitrary privileged umr call.
+        """
+        argv = [str(a) for a in args]
 
-                    password = auth_result['password']
-                    if not password:
-                        return None
+        if argv == ["--enumerate"]:
+            return self.run_helper("enumerate")
 
-                    # Run sudo with password via stdin (suppress prompt)
-                    cmd = ["sudo", "-S", "-p", "", "umr"] + args
-                    result = subprocess.run(cmd,
-                                          input=password + '\n',
-                                          capture_output=True,
-                                          text=True,
-                                          timeout=5,
-                                          errors='replace')
+        inst = None
+        if len(argv) >= 2 and argv[0] == "-i":
+            inst, argv = argv[1], argv[2:]
 
-                    # Check if authentication failed
-                    if result.returncode != 0 and ('Sorry' in result.stderr or 'incorrect password' in result.stderr.lower()):
-                        messagebox.showerror("Authentication Failed",
-                                           "Incorrect password.\n"
-                                           "Please try the operation again.")
-                        return None
+        if inst is not None:
+            if argv == ["--list-blocks"]:
+                return self.run_helper("list-blocks", inst)
+            if len(argv) == 2 and argv[0] == "-r":
+                return self.run_helper("read-reg", inst, argv[1])
+            if (len(argv) == 4 and argv[0] == "-O" and argv[1] == "bits"
+                    and argv[2] == "-r"):
+                return self.run_helper("read-bits", inst, argv[3])
+            if len(argv) == 3 and argv[0] == "-wb":
+                return self.run_helper("write-bits", inst, argv[1], argv[2])
 
-                    # Authentication successful!
-                    # Check if user wants passwordless access
-                    console_print(f"DEBUG: auth_result = {auth_result}")
-                    console_print(f"DEBUG: auth_result.get('enable_passwordless', False) = {auth_result.get('enable_passwordless', False)}")
-                    if auth_result.get('enable_passwordless', False):
-                        console_print("DEBUG: User checked 'Don't ask again' - enabling passwordless...")
-                        # User checked "Don't ask again" - enable passwordless
-                        if self.enable_passwordless_access_with_password(password):
-                            # Success! Refresh menubar to show new status
-                            self.refresh_menubar()
-                    else:
-                        console_print("DEBUG: User DID NOT check 'Don't ask again' - NOT enabling passwordless")
-
-                    return result.stdout
-        except subprocess.TimeoutExpired:
-            messagebox.showerror("Error", "UMR command timed out")
-            return None
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to run UMR command:\n{e}")
-            return None
+        console_print(f"refusing unsupported umr invocation: {args}")
+        return None
 
     def get_pci_address_for_instance(self, instance):
         """Get PCI address for a UMR GPU instance"""
         try:
             # Method 1: Parse from UMR enumerate output
-            result = subprocess.run(
-                ['sudo', '-n', 'umr', '--enumerate'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
+            enumerate_out = self.run_helper('enumerate') or ''
+            result = types.SimpleNamespace(stdout=enumerate_out, returncode=0)
             
             # Look for this instance and extract PCI from the output
             # Example: "pci:0000:03:00.0, instance:0, asic:navi23"
@@ -21515,19 +21194,18 @@ class RedControl:
                 # Use sudo find since regular user can't see /sys/kernel/debug/dri
                 console_print(f"Looking for colorspace file for crtc-{monitor_index}...")
 
-                # Use find with sudo to locate the file
+                # Locate the file through the helper (walked in-process; find(1)
+                # is never invoked with privileges, since find -exec is a root shell)
                 try:
-                    find_result = subprocess.run(
-                        ['sudo', '-n', 'find', '/sys/kernel/debug/dri', '-type', 'f',
-                         '-name', 'amdgpu_current_colorspace', '-path', f'*/crtc-{monitor_index}/*'],
-                        capture_output=True, text=True, timeout=2
-                    )
+                    find_result = self.list_debugfs(
+                        name='amdgpu_current_colorspace',
+                        contains=f'/crtc-{monitor_index}/')
 
                     if find_result.returncode == 0 and find_result.stdout.strip():
                         crtc_paths = [p.strip() for p in find_result.stdout.strip().split('\n') if p.strip()]
-                        console_print(f"  sudo find found paths: {crtc_paths}")
+                        console_print(f"  debugfs scan found paths: {crtc_paths}")
                     else:
-                        console_print(f"  sudo find returned nothing (rc={find_result.returncode})")
+                        console_print(f"  debugfs scan returned nothing (rc={find_result.returncode})")
                         crtc_paths = []
                 except Exception as e:
                     console_print(f"  Exception during sudo find: {e}")
@@ -21547,8 +21225,7 @@ class RedControl:
                         console_print(f"  Direct read failed (permission denied), trying sudo...")
                         try:
                             # First try passwordless sudo
-                            result = subprocess.run(['sudo', '-n', 'cat', path],
-                                                  capture_output=True, text=True, timeout=1)
+                            result = self._debugfs_result(path)
                             if result.returncode == 0 and result.stdout.strip():
                                 colorspace = result.stdout.strip()
                                 console_print(f"Found colorspace for {connector_name} (FMT{monitor_index}/crtc-{monitor_index}): {colorspace}")
@@ -21558,12 +21235,7 @@ class RedControl:
                                 console_print(f"  Passwordless not enabled, trying regular sudo...")
                                 console_print(f"  >>> Password prompt will appear in your TERMINAL window! <<<")
                                 # Let stdin go to terminal so password prompt works, but suppress stderr to avoid noise
-                                result2 = subprocess.Popen(['sudo', 'cat', path],
-                                                         stdout=subprocess.PIPE,
-                                                         stderr=subprocess.DEVNULL,  # Suppress stderr errors
-                                                         stdin=None,
-                                                         text=True)
-                                stdout, _ = result2.communicate(timeout=30)
+                                stdout, _ = (self.read_debugfs(path) or ''), None
                                 # Check returncode AFTER communicate()
                                 if stdout and stdout.strip():
                                     colorspace = stdout.strip()
@@ -21616,20 +21288,14 @@ class RedControl:
                                                 # Try with sudo if direct read fails
                                                 try:
                                                     # First try passwordless sudo
-                                                    result = subprocess.run(['sudo', '-n', 'cat', crtc_path],
-                                                                          capture_output=True, text=True, timeout=1)
+                                                    result = self._debugfs_result(crtc_path)
                                                     if result.returncode == 0 and result.stdout.strip():
                                                         colorspace = result.stdout.strip()
                                                         console_print(f"Found colorspace for {connector_name}: {colorspace} at {crtc_path}")
                                                         return colorspace
                                                     else:
                                                         # Passwordless failed, try regular sudo
-                                                        result2 = subprocess.Popen(['sudo', 'cat', crtc_path],
-                                                                                 stdout=subprocess.PIPE,
-                                                                                 stderr=subprocess.DEVNULL,
-                                                                                 stdin=None,
-                                                                                 text=True)
-                                                        stdout, _ = result2.communicate(timeout=30)
+                                                        stdout, _ = (self.read_debugfs(crtc_path) or ''), None
                                                         if stdout and stdout.strip():
                                                             colorspace = stdout.strip()
                                                             console_print(f"Found colorspace for {connector_name}: {colorspace} at {crtc_path}")
@@ -21656,20 +21322,14 @@ class RedControl:
                     # Try with sudo if direct read fails
                     try:
                         # First try passwordless sudo
-                        result = subprocess.run(['sudo', '-n', 'cat', path],
-                                              capture_output=True, text=True, timeout=1)
+                        result = self._debugfs_result(path)
                         if result.returncode == 0 and result.stdout.strip():
                             colorspace = result.stdout.strip()
                             console_print(f"Found colorspace (fallback): {colorspace} at {path}")
                             return colorspace
                         else:
                             # Passwordless failed, try regular sudo
-                            result2 = subprocess.Popen(['sudo', 'cat', path],
-                                                     stdout=subprocess.PIPE,
-                                                     stderr=subprocess.DEVNULL,
-                                                     stdin=None,
-                                                     text=True)
-                            stdout, _ = result2.communicate(timeout=30)
+                            stdout, _ = (self.read_debugfs(path) or ''), None
                             if stdout and stdout.strip():
                                 colorspace = stdout.strip()
                                 console_print(f"Found colorspace (fallback): {colorspace} at {path}")
@@ -21723,8 +21383,7 @@ class RedControl:
                                                             return colorspace
                                                 except PermissionError:
                                                     # Try with sudo -n (only works if passwordless enabled)
-                                                    result = subprocess.run(['sudo', '-n', 'cat', crtc_path],
-                                                                          capture_output=True, text=True, timeout=0.5)
+                                                    result = self._debugfs_result(crtc_path)
                                                     if result.returncode == 0:
                                                         colorspace = result.stdout.strip()
                                                         if colorspace and colorspace != "":
@@ -21749,8 +21408,7 @@ class RedControl:
                                 return colorspace
                     except PermissionError:
                         # Try with sudo -n (only works if passwordless enabled)
-                        result = subprocess.run(['sudo', '-n', 'cat', path],
-                                              capture_output=True, text=True, timeout=0.5)
+                        result = self._debugfs_result(path)
                         if result.returncode == 0:
                             colorspace = result.stdout.strip()
                             if colorspace and colorspace != "":
@@ -22739,123 +22397,15 @@ Restart this tool to detect UMR automatically.
         else:
             autostart_menu.add_command(label="Enable Auto-Start", command=self.enable_autostart_and_refresh)
 
-        # Passwordless Access section
-        autostart_menu.add_separator()
-        passwordless_enabled = self.is_passwordless_enabled()
-
-        if passwordless_enabled:
-            autostart_menu.add_command(label="Disable Passwordless Access",
-                                    command=self.disable_passwordless_and_refresh)
-        else:
-            autostart_menu.add_command(label="Enable Passwordless Access",
-                                    command=self.enable_passwordless_and_refresh)
+        if self.legacy_sudoers_present():
+            autostart_menu.add_separator()
+            autostart_menu.add_command(label="Remove Old Passwordless Rule (insecure)",
+                                    command=self.remove_legacy_and_refresh)
         # Help menu removed (use in-app UI)
-    def enable_passwordless_and_refresh(self):
-        """Enable passwordless and refresh menu"""
-        if self.enable_passwordless_access():
+    def remove_legacy_and_refresh(self):
+        """Remove the pre-1.1 passwordless sudo rule, then refresh the menu."""
+        if self.remove_legacy_sudoers():
             self.refresh_menubar()
-
-    def disable_passwordless_and_refresh(self):
-        """Disable passwordless and refresh menu"""
-        if self.disable_passwordless_access():
-            self.refresh_menubar()
-
-    def create_sudoers_rules(self):
-        """Create passwordless sudoers rules (standalone function)"""
-        try:
-            username = os.getenv('SUDO_USER') or os.getenv('USER')
-            system_path = '/usr/local/bin/redcontrol.py'
-
-            # Create script to set up sudoers
-            sudoers_script = f"""#!/bin/bash
-set -e
-
-echo "Creating passwordless sudoers rules..."
-echo ""
-
-# Find umr path
-UMR_PATH=$(which umr 2>/dev/null || echo "/usr/bin/umr")
-echo "Found UMR at: $UMR_PATH"
-echo ""
-
-# Create sudoers rule
-cat > /etc/sudoers.d/redcontrol << EOF
-# Allow running RedControl without password
-{username} ALL=(root) NOPASSWD: /usr/bin/python3 {system_path}
-{username} ALL=(root) NOPASSWD: /usr/bin/python3 {system_path} *
-{username} ALL=(root) NOPASSWD: {system_path}
-{username} ALL=(root) NOPASSWD: {system_path} *
-
-# Allow running UMR without password
-{username} ALL=(root) NOPASSWD: $UMR_PATH
-{username} ALL=(root) NOPASSWD: $UMR_PATH *
-EOF
-
-chmod 0440 /etc/sudoers.d/redcontrol
-echo "✓ Sudoers rules created"
-echo ""
-
-# Verify syntax
-if visudo -c -f /etc/sudoers.d/redcontrol; then
-    echo "✓ Sudoers syntax valid"
-else
-    echo "✗ Sudoers syntax error! Removing file..."
-    rm /etc/sudoers.d/redcontrol
-    exit 1
-fi
-
-echo ""
-echo "✅ Passwordless rules created successfully!"
-echo ""
-echo "You can now run without password:"
-echo "  sudo python3 {system_path}"
-echo ""
-echo "Press Enter to close..."
-read
-"""
-
-            # Save script
-            script_path = '/tmp/redcontrol-sudoers.sh'
-            with open(script_path, 'w') as f:
-                f.write(sudoers_script)
-            os.chmod(script_path, 0o755)
-
-            # Find terminal
-            terminals = [
-                ('konsole', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                ('gnome-terminal', ['{term}', '--', 'sudo', 'bash', '{script}']),
-                ('xfce4-terminal', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                ('mate-terminal', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                ('xterm', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-            ]
-
-            terminal_cmd = None
-            for term, cmd_template in terminals:
-                if subprocess.run(['which', term], capture_output=True).returncode == 0:
-                    terminal_cmd = [x.format(term=term, script=script_path) for x in cmd_template]
-                    break
-
-            if terminal_cmd:
-                subprocess.Popen(terminal_cmd)
-
-                messagebox.showinfo(
-                    "Creating Passwordless Rules",
-                    "Terminal window opened!\n\n"
-                    "• Enter your password when prompted\n"
-                    "• Rules will be created automatically\n"
-                    "• Press Enter in terminal when done\n\n"
-                    "After completion:\n"
-                    "• Tool will run without password\n"
-                    "• Auto-start will work without prompts"
-                )
-                return True
-            else:
-                messagebox.showerror("Error", "No suitable terminal emulator found!")
-                return False
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to create sudoers rules:\n{e}")
-            return False
 
     def enable_autostart(self):
         """Enable auto-start on boot (keeps auto-start and passwordless separate)"""
@@ -22876,7 +22426,7 @@ read
 Type=Application
 Name=RedControl
 Comment=AMD GPU Display Control Tool
-Exec=sudo python3 {exec_path} --minimize
+Exec=python3 {exec_path} --minimize
 Icon=video-display
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -22890,11 +22440,10 @@ StartupNotify=false
             desktop_file.chmod(0o755)
 
             messagebox.showinfo("Auto-Start Enabled ✓",
-                              "Tool will now start automatically on login!\n\n"
-                              "Note: If passwordless access is not enabled,\n"
-                              "you'll need to enter your password on each login.\n\n"
-                              "Enable passwordless access separately from:\n"
-                              "Auto-Start → Enable Passwordless Access")
+                              "RedControl will now start automatically on login.\n\n"
+                              "It starts as your own user, not as root. The first "
+                              "GPU change of each session asks for authentication, "
+                              "and polkit remembers it until you log out.")
             return True
 
         except Exception as e:
@@ -22902,341 +22451,6 @@ StartupNotify=false
             traceback.print_exc()
             messagebox.showerror("Error", f"Failed to enable auto-start:\n{e}")
             return False
-
-    def enable_autostart_passwordless(self):
-        """Enable passwordless auto-start (installs system-wide with sudoers)"""
-        try:
-            # Check if already installed system-wide
-            system_path = Path('/usr/local/bin/redcontrol.py')
-            script_path = os.path.abspath(__file__)
-
-            # Ask for password upfront
-            password = self.show_simple_password_dialog(
-                "Enable Passwordless Auto-Start",
-                "Enter your password to enable passwordless auto-start.\n\n"
-                "This will:\n"
-                "• Install tool to /usr/local/bin/\n"
-                "• Create passwordless sudoers rules\n"
-                "• Enable auto-start on login"
-            )
-
-            if password is None:
-                # User cancelled
-                return False
-
-            # Step 1: Install system-wide if not already installed
-            if not system_path.exists():
-                console_print("Installing to /usr/local/bin/...")
-                # Copy script to /usr/local/bin/
-                result = subprocess.run(
-                    ['sudo', '-S', '-p', '', 'install', '-m', '755', script_path, '/usr/local/bin/redcontrol.py'],
-                    input=password + '\n',
-                    capture_output=True, text=True
-                )
-
-                if result.returncode != 0:
-                    messagebox.showerror("Error", f"Failed to install tool:\n{result.stderr}")
-                    return False
-
-                console_print("✓ Installed to /usr/local/bin/")
-            else:
-                console_print("✓ Already installed in /usr/local/bin/")
-
-            # Step 2: Create sudoers rules for both the tool AND UMR
-            console_print("Creating passwordless sudoers rules...")
-            username = os.getenv('USER')
-            umr_path = shutil.which('umr') or '/usr/local/bin/umr'
-
-            # Create sudoers content
-            # Include /usr/bin/cat for reading debugfs files (colorspace, etc)
-            # Include mount/mountpoint/mkdir for automatic debugfs mounting
-            # Include find to locate debugfs files
-            sudoers_content = f"""# RedControl - Passwordless access
-# Created by auto-start setup
-{username} ALL=(root) NOPASSWD: /usr/bin/python3 /usr/local/bin/redcontrol.py
-{username} ALL=(root) NOPASSWD: /usr/bin/python3 /usr/local/bin/redcontrol.py *
-{username} ALL=(root) NOPASSWD: /usr/local/bin/redcontrol.py
-{username} ALL=(root) NOPASSWD: /usr/local/bin/redcontrol.py *
-{username} ALL=(root) NOPASSWD: {umr_path}
-{username} ALL=(root) NOPASSWD: {umr_path} *
-{username} ALL=(root) NOPASSWD: /usr/bin/true
-{username} ALL=(root) NOPASSWD: /usr/bin/cat
-{username} ALL=(root) NOPASSWD: /usr/bin/cat *
-{username} ALL=(root) NOPASSWD: /usr/bin/mount
-{username} ALL=(root) NOPASSWD: /usr/bin/mount *
-{username} ALL=(root) NOPASSWD: /usr/bin/mountpoint
-{username} ALL=(root) NOPASSWD: /usr/bin/mountpoint *
-{username} ALL=(root) NOPASSWD: /usr/bin/mkdir
-{username} ALL=(root) NOPASSWD: /usr/bin/mkdir *
-{username} ALL=(root) NOPASSWD: /usr/bin/find
-{username} ALL=(root) NOPASSWD: /usr/bin/find *
-"""
-
-            # Write to temp file
-            temp_sudoers = '/tmp/redcontrol-sudoers'
-            with open(temp_sudoers, 'w') as f:
-                f.write(sudoers_content)
-
-            # Install sudoers file
-            result = subprocess.run(
-                ['sudo', '-S', '-p', '', 'install', '-m', '0440', temp_sudoers, '/etc/sudoers.d/redcontrol'],
-                input=password + '\n',
-                capture_output=True, text=True
-            )
-
-            if result.returncode != 0:
-                messagebox.showerror("Error", f"Failed to create sudoers rules:\n{result.stderr}")
-                os.remove(temp_sudoers)
-                return False
-
-            # Verify syntax
-            result = subprocess.run(
-                ['sudo', '-S', '-p', '', 'visudo', '-c', '-f', '/etc/sudoers.d/redcontrol'],
-                input=password + '\n',
-                capture_output=True, text=True
-            )
-
-            if result.returncode != 0:
-                messagebox.showerror("Error", "Sudoers syntax error! Removing file...")
-                subprocess.run(['sudo', '-S', '-p', '', 'rm', '-f', '/etc/sudoers.d/redcontrol'],
-                             input=password + '\n', capture_output=True)
-                os.remove(temp_sudoers)
-                return False
-
-            # Clean up temp file
-            os.remove(temp_sudoers)
-
-            # Mark that passwordless is enabled
-            self.passwordless_just_enabled = True
-
-            console_print("✓ Sudoers rules created")
-
-            # Step 3: Create auto-start entry
-            autostart_dir = Path.home() / '.config' / 'autostart'
-            autostart_dir.mkdir(parents=True, exist_ok=True)
-
-            desktop_file = autostart_dir / 'redcontrol.desktop'
-            desktop_content = f"""[Desktop Entry]
-Type=Application
-Name=RedControl
-Comment=AMD GPU Display Control Tool (Passwordless)
-Exec=sudo python3 /usr/local/bin/redcontrol.py --minimize
-Icon=video-display
-Terminal=false
-X-GNOME-Autostart-enabled=true
-Categories=System;Settings;
-StartupNotify=false
-"""
-
-            with open(desktop_file, 'w') as f:
-                f.write(desktop_content)
-
-            desktop_file.chmod(0o755)
-
-            console_print("✓ Auto-start entry created")
-
-            messagebox.showinfo("Auto-Start Enabled ✓",
-                              "Passwordless auto-start is now enabled!\n\n"
-                              "✅ Tool will start on login WITHOUT password\n"
-                              "✅ UMR commands work without password\n"
-                              "✅ Starts minimized to taskbar\n"
-                              "✅ Click taskbar icon to open\n\n"
-                              f"Location: /usr/local/bin/redcontrol.py")
-            return True
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            messagebox.showerror("Error", f"Failed to enable auto-start:\n{e}")
-            return False
-
-    def enable_autostart_with_password(self):
-        """Enable auto-start with password prompt"""
-        try:
-            script_path = os.path.abspath(__file__)
-
-            # Create XDG autostart directory
-            autostart_dir = Path.home() / '.config' / 'autostart'
-            autostart_dir.mkdir(parents=True, exist_ok=True)
-
-            desktop_file = autostart_dir / 'redcontrol.desktop'
-
-            # Check if installed system-wide
-            system_path = Path('/usr/local/bin/redcontrol.py')
-            exec_path = str(system_path) if system_path.exists() else script_path
-
-            desktop_content = f"""[Desktop Entry]
-Type=Application
-Name=RedControl
-Comment=AMD GPU Display Control Tool (Password Required)
-Exec=sudo python3 {exec_path} --minimize
-Icon=video-display
-Terminal=false
-X-GNOME-Autostart-enabled=true
-Categories=System;Settings;
-StartupNotify=false
-"""
-
-            with open(desktop_file, 'w') as f:
-                f.write(desktop_content)
-
-            desktop_file.chmod(0o755)
-
-            messagebox.showinfo("Auto-Start Enabled",
-                              "Auto-start is now enabled.\n\n"
-                              "⚠️ You'll be asked for your password on each login\n\n"
-                              "Tool will start minimized to taskbar.\n"
-                              "Click the taskbar icon to open.\n\n"
-                              "To enable passwordless:\n"
-                              "Disable and re-enable auto-start,\n"
-                              "then choose 'Passwordless' option.")
-            return True
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to enable auto-start:\n{e}")
-            return False
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to enable autostart:\n{e}")
-            return False
-
-    def install_system_wide(self):
-        """Install tool system-wide for passwordless operation"""
-        try:
-            script_path = os.path.abspath(__file__)
-            system_path = '/usr/local/bin/redcontrol.py'
-            # Get the real user (not root) - SUDO_USER contains original user when run with sudo
-            username = os.getenv('SUDO_USER') or os.getenv('USER')
-
-            # Create install script
-            install_script = f"""#!/bin/bash
-set -e
-
-echo "Installing RedControl system-wide..."
-echo ""
-
-# Copy tool
-echo "1. Copying to {system_path}..."
-cp "{script_path}" "{system_path}"
-chmod +x "{system_path}"
-echo "✓ Installed"
-echo ""
-
-# Find umr path
-UMR_PATH=$(which umr 2>/dev/null || echo "/usr/bin/umr")
-echo "2. Found UMR at: $UMR_PATH"
-echo ""
-
-# Create sudoers rule for both script and umr
-echo "3. Creating sudoers rules for passwordless operation..."
-cat > /etc/sudoers.d/redcontrol << EOF
-# Allow running RedControl without password (multiple invocation methods)
-{username} ALL=(root) NOPASSWD: /usr/bin/python3 {system_path}
-{username} ALL=(root) NOPASSWD: /usr/bin/python3 {system_path} *
-{username} ALL=(root) NOPASSWD: {system_path}
-{username} ALL=(root) NOPASSWD: {system_path} *
-
-# Allow running UMR without password (for register access)
-{username} ALL=(root) NOPASSWD: $UMR_PATH
-{username} ALL=(root) NOPASSWD: $UMR_PATH *
-EOF
-
-chmod 0440 /etc/sudoers.d/redcontrol
-echo "✓ Sudoers rules created"
-echo ""
-
-# Verify sudoers syntax
-if visudo -c -f /etc/sudoers.d/redcontrol; then
-    echo "✓ Sudoers syntax valid"
-else
-    echo "✗ Sudoers syntax error! Removing file..."
-    rm /etc/sudoers.d/redcontrol
-    exit 1
-fi
-echo ""
-
-echo "✅ Installation complete!"
-echo ""
-echo "You can now run without password:"
-echo "  sudo python3 {system_path}"
-echo "  sudo umr --version"
-echo ""
-echo "Auto-start will work without password prompts."
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Press Enter to close this window..."
-read
-"""
-
-            # Save install script
-            install_script_path = '/tmp/redcontrol-install.sh'
-            with open(install_script_path, 'w') as f:
-                f.write(install_script)
-            os.chmod(install_script_path, 0o755)
-
-            # Show instructions
-            msg = f"""System-Wide Installation
-
-The tool will be installed to:
-  {system_path}
-
-A sudoers rule will be created to allow passwordless operation.
-
-Click OK to run the installer (requires sudo password):
-"""
-
-            result = messagebox.askokcancel("Install System-Wide", msg)
-
-            if result:
-                # Run installer in terminal with hold/keep-open flags
-                terminal_cmd = None
-                terminal_found = None
-
-                # Try different terminal emulators
-                terminals = [
-                    ('konsole', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                    ('gnome-terminal', ['{term}', '--', 'sudo', 'bash', '{script}']),
-                    ('xfce4-terminal', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                    ('alacritty', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                    ('kitty', ['{term}', 'sudo', 'bash', '{script}']),
-                    ('xterm', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                    ('mate-terminal', ['{term}', '-e', 'sudo', 'bash', '{script}']),
-                ]
-
-                for term, cmd_template in terminals:
-                    if subprocess.run(['which', term], capture_output=True).returncode == 0:
-                        terminal_found = term
-                        terminal_cmd = [x.format(term=term, script=install_script_path) for x in cmd_template]
-                        break
-
-                if terminal_cmd:
-                    try:
-                        # Launch terminal
-                        subprocess.Popen(terminal_cmd)
-
-                        # Show simple success message
-                        messagebox.showinfo(
-                            "Installation Started",
-                            f"Terminal window opened!\n\n"
-                            f"• Enter your password when prompted\n"
-                            f"• Installation will run automatically\n"
-                            f"• Window will stay open to show results\n"
-                            f"• Press Enter in terminal when done\n\n"
-                            f"After installation:\n"
-                            f"• Tool will work without password\n"
-                            f"• Auto-start will work on login",
-                            icon='info'
-                        )
-
-                    except Exception as e:
-                        # Terminal launch failed
-                        self.show_manual_install_dialog(install_script_path)
-                else:
-                    # No terminal found
-                    self.show_manual_install_dialog(install_script_path)
-
-        except Exception as e:
-            messagebox.showerror("Installation Error", f"Failed to install:\n{e}")
 
     def show_manual_install_dialog(self, install_script_path):
         """Show big dialog with manual installation instructions"""
@@ -24328,8 +23542,7 @@ sudo -n umr --version
                 cat_worked = False
                 for test_path in test_paths:
                     # Silently test each path - redirect stderr to /dev/null
-                    cat_result = subprocess.run(['sudo', '-n', 'sh', '-c', f'cat "{test_path}" 2>/dev/null'],
-                                              capture_output=True, text=True, timeout=1)
+                    cat_result = self._debugfs_result(test_path)
                     if cat_result.returncode == 0 and cat_result.stdout.strip():
                         console_print(f"✓ Passwordless sudo cat works on: {test_path}")
                         console_print("  Colorspace should be readable.")
@@ -26826,18 +26039,14 @@ sudo -n umr --version
             except Exception:
                 pass
 
-            find = subprocess.run(
-                ['sudo', '-n', 'find', '/sys/kernel/debug/dri', '-maxdepth', '3',
-                 '-name', filename],
-                capture_output=True, text=True, timeout=3)
+            find = self.list_debugfs(name=filename)
             candidates = [p for p in find.stdout.split() if f"/{drm_name}/" in p]
             if pci:
                 preferred = [p for p in candidates if pci in p]
                 candidates = preferred or candidates
 
             for path in candidates:
-                cat = subprocess.run(['sudo', '-n', 'cat', path],
-                                     capture_output=True, text=True, timeout=3)
+                cat = self._debugfs_result(path)
                 txt = cat.stdout.strip()
                 if txt:
                     return txt
@@ -27110,8 +26319,9 @@ sudo -n umr --version
             pinned = [(idx, w) for idx, w in getattr(self, 'dp_widgets', {}).items()
                       if w.get('pin_var') is not None and w['pin_var'].get()
                       and w.get('pinned_label')]
-            # Never prompt for a password from a background timer
-            if pinned and (os.geteuid() == 0 or self.check_sudo_cached()):
+            # Never raise an auth dialog from a background timer: only reapply
+            # once the user has already authorised the helper this session.
+            if pinned and (os.geteuid() == 0 or self._helper_authorized):
                 for idx, w in pinned:
                     try:
                         self._pin_reapply_if_needed(idx, w)

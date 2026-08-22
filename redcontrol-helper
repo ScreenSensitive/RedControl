@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""
+RedControl privileged helper.
+
+Runs as root and performs the small, fixed set of GPU operations RedControl
+needs. It deliberately does NOT accept a umr command line: umr can write
+arbitrary MMIO registers and arbitrary GPU virtual memory (--vm-write reaches
+GTT-mapped system RAM), so handing it user-supplied arguments as root is a
+privilege escalation. The helper exposes verbs instead and builds the umr
+argv itself.
+
+Verbs:
+  enumerate                          list GPU instances
+  list-blocks   <inst>               list register blocks
+  read-reg      <inst> <reg>         read a register
+  read-bits     <inst> <reg>         read a register, decoded into bitfields
+  write-bits    <inst> <reg.FIELD> <value>
+  read-debugfs  <path>               read one file under /sys/kernel/debug/dri
+  list-debugfs                       list candidate debugfs files
+  ensure-debugfs                     mount debugfs if it is not mounted
+
+Add --dry-run before the verb to print the command that would run without
+touching the hardware.
+
+Exit codes: 0 ok, 2 usage/validation error, 3 not root, 4 umr missing or
+unsafe, 5 policy denied, 6 underlying command failed.
+"""
+
+import os
+import re
+import sys
+import stat
+import shlex
+import syslog
+import subprocess
+
+DEBUGFS_ROOT = "/sys/kernel/debug"
+DRI_ROOT = os.path.join(DEBUGFS_ROOT, "dri")
+UMR_CANDIDATES = ("/usr/local/bin/umr", "/usr/bin/umr", "/bin/umr")
+POLICY_FILE = "/etc/redcontrol/policy.conf"
+SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+CMD_TIMEOUT = 15
+
+# Syntax rules. Register paths are umr's dotted names (e.g.
+# mmFMT0_FMT_BIT_DEPTH_CONTROL.FMT_SPATIAL_DITHER_MODE) -- never filesystem
+# paths, so slashes and dots-dot sequences are rejected outright.
+RE_REGISTER = re.compile(r"^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64}){0,3}$")
+RE_FIELD = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+# Which registers/fields may be WRITTEN. Reads are syntax-checked only; writes
+# are additionally restricted, so a flaw elsewhere in RedControl cannot be
+# turned into "write any GPU register". Extend via POLICY_FILE:
+#     allow-register = ^mmDIG[0-9]*_.*$
+#     allow-field    = ^DIG_[A-Z0-9_]+$
+WRITE_REGISTER_ALLOW = [r"^mm[A-Za-z0-9_]*FMT[A-Za-z0-9_]*$"]
+WRITE_FIELD_ALLOW = [r"^FMT_[A-Z0-9_]+$"]
+
+MAX_VALUE = 0xFFFFFFFF
+
+
+def die(code, msg):
+    print("redcontrol-helper: %s" % msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def audit(msg):
+    try:
+        syslog.openlog("redcontrol-helper", syslog.LOG_PID, syslog.LOG_AUTHPRIV)
+        syslog.syslog(syslog.LOG_NOTICE, msg)
+    except Exception:
+        pass
+
+
+def caller():
+    """Best-effort identity of whoever invoked us, for the audit log."""
+    for var in ("PKEXEC_UID", "SUDO_UID"):
+        if os.environ.get(var, "").isdigit():
+            return "uid=%s" % os.environ[var]
+    return "uid=unknown"
+
+
+def load_policy():
+    """Merge optional operator-supplied allow patterns."""
+    reg = list(WRITE_REGISTER_ALLOW)
+    fld = list(WRITE_FIELD_ALLOW)
+    try:
+        st = os.stat(POLICY_FILE)
+    except OSError:
+        return reg, fld
+    # Only honour the file if root owns it and others cannot write it.
+    if st.st_uid != 0 or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        audit("ignoring %s: not root-owned or world/group-writable" % POLICY_FILE)
+        return reg, fld
+    try:
+        with open(POLICY_FILE, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip()
+                if not val:
+                    continue
+                try:
+                    re.compile(val)
+                except re.error:
+                    continue
+                if key == "allow-register":
+                    reg.append(val)
+                elif key == "allow-field":
+                    fld.append(val)
+    except OSError:
+        pass
+    return reg, fld
+
+
+def find_umr():
+    """Locate umr without consulting PATH, and refuse an unsafe binary.
+
+    PATH is attacker-influenced: a writable ~/.local/bin/umr earlier in PATH
+    would otherwise mean this helper executes user-controlled code as root.
+    """
+    for path in UMR_CANDIDATES:
+        if not os.path.isfile(path):
+            continue
+        st = os.stat(path)
+        if st.st_uid != 0:
+            die(4, "%s is not owned by root -- refusing to run it" % path)
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            die(4, "%s is group- or world-writable -- refusing to run it" % path)
+        return path
+    die(4, "umr not found in %s" % ", ".join(UMR_CANDIDATES))
+
+
+def run(argv, dry_run, stdin_data=None):
+    if dry_run:
+        print(" ".join(shlex.quote(a) for a in argv))
+        return 0
+    env = {"PATH": SAFE_PATH, "LC_ALL": "C"}
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=CMD_TIMEOUT, env=env, errors="replace",
+                              input=stdin_data)
+    except subprocess.TimeoutExpired:
+        die(6, "command timed out after %ds" % CMD_TIMEOUT)
+    except OSError as exc:
+        die(6, "failed to execute: %s" % exc)
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+def want_instance(raw):
+    if not re.fullmatch(r"[0-9]{1,2}", raw):
+        die(2, "instance must be a small non-negative integer")
+    inst = int(raw)
+    if inst > 15:
+        die(2, "instance out of range (0-15)")
+    return str(inst)
+
+
+def want_register(raw, for_write):
+    if not RE_REGISTER.match(raw):
+        die(2, "malformed register name: %r" % raw)
+    if not for_write:
+        return raw
+    reg, _, field = raw.partition(".")
+    if not field:
+        die(2, "writes require a REGISTER.FIELD name")
+    if not RE_FIELD.match(field):
+        die(2, "malformed field name: %r" % field)
+    reg_allow, field_allow = load_policy()
+    if not any(re.match(p, reg) for p in reg_allow):
+        die(5, "register %r is not writable by policy (see %s)" % (reg, POLICY_FILE))
+    if not any(re.match(p, field) for p in field_allow):
+        die(5, "field %r is not writable by policy (see %s)" % (field, POLICY_FILE))
+    return raw
+
+
+def want_value(raw):
+    try:
+        val = int(raw, 0)
+    except ValueError:
+        die(2, "value must be an integer")
+    if val < 0 or val > MAX_VALUE:
+        die(2, "value out of range (0-0x%X)" % MAX_VALUE)
+    return str(val)
+
+
+def want_debugfs_path(raw):
+    """Resolve first, then check -- never check-then-open, which races."""
+    if "\x00" in raw:
+        die(2, "invalid path")
+    real = os.path.realpath(raw)
+    if real != DRI_ROOT and not real.startswith(DRI_ROOT + os.sep):
+        die(2, "path escapes %s: %r" % (DRI_ROOT, raw))
+    try:
+        st = os.lstat(real)
+    except OSError as exc:
+        die(2, "cannot stat %s: %s" % (real, exc.strerror))
+    if not stat.S_ISREG(st.st_mode):
+        die(2, "not a regular file: %s" % real)
+    return real
+
+
+def debugfs_mounted():
+    return os.path.ismount(DEBUGFS_ROOT)
+
+
+def cmd_ensure_debugfs(args, dry_run):
+    if debugfs_mounted():
+        print("already mounted")
+        return 0
+    if not os.path.isdir(DEBUGFS_ROOT):
+        rc = run(["/usr/bin/mkdir", "-p", DEBUGFS_ROOT], dry_run)
+        if rc != 0:
+            return rc
+    return run(["/usr/bin/mount", "-t", "debugfs", "none", DEBUGFS_ROOT], dry_run)
+
+
+def cmd_list_debugfs(args, dry_run):
+    if not os.path.isdir(DRI_ROOT):
+        die(6, "%s not present (is debugfs mounted?)" % DRI_ROOT)
+    # Walked in-process rather than shelling out to find(1), whose -exec makes
+    # it a root shell if it is ever reachable with elevated privileges.
+    out = []
+    for dirpath, dirnames, filenames in os.walk(DRI_ROOT):
+        depth = dirpath[len(DRI_ROOT):].count(os.sep)
+        if depth >= 3:
+            dirnames[:] = []
+        for name in filenames:
+            out.append(os.path.join(dirpath, name))
+    print("\n".join(sorted(out)))
+    return 0
+
+
+def cmd_read_debugfs(args, dry_run):
+    if len(args) != 1:
+        die(2, "read-debugfs takes exactly one path")
+    path = want_debugfs_path(args[0])
+    if dry_run:
+        print("read %s" % path)
+        return 0
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        die(6, "cannot open %s: %s" % (path, exc.strerror))
+    try:
+        with os.fdopen(fd, "r", errors="replace") as fh:
+            sys.stdout.write(fh.read())
+    except OSError as exc:
+        die(6, "cannot read %s: %s" % (path, exc.strerror))
+    return 0
+
+
+def cmd_enumerate(args, dry_run):
+    if args:
+        die(2, "enumerate takes no arguments")
+    return run([find_umr(), "--enumerate"], dry_run)
+
+
+def cmd_list_blocks(args, dry_run):
+    if len(args) != 1:
+        die(2, "list-blocks takes <instance>")
+    return run([find_umr(), "-i", want_instance(args[0]), "--list-blocks"], dry_run)
+
+
+def cmd_read_reg(args, dry_run):
+    if len(args) != 2:
+        die(2, "read-reg takes <instance> <register>")
+    inst = want_instance(args[0])
+    reg = want_register(args[1], for_write=False)
+    return run([find_umr(), "-i", inst, "-r", reg], dry_run)
+
+
+def cmd_read_bits(args, dry_run):
+    if len(args) != 2:
+        die(2, "read-bits takes <instance> <register>")
+    inst = want_instance(args[0])
+    reg = want_register(args[1], for_write=False)
+    return run([find_umr(), "-i", inst, "-O", "bits", "-r", reg], dry_run)
+
+
+def cmd_write_bits(args, dry_run):
+    if len(args) != 3:
+        die(2, "write-bits takes <instance> <REGISTER.FIELD> <value>")
+    inst = want_instance(args[0])
+    reg = want_register(args[1], for_write=True)
+    val = want_value(args[2])
+    audit("%s write-bits inst=%s %s=%s" % (caller(), inst, reg, val))
+    return run([find_umr(), "-i", inst, "-wb", reg, val], dry_run)
+
+
+VERBS = {
+    "enumerate": cmd_enumerate,
+    "list-blocks": cmd_list_blocks,
+    "read-reg": cmd_read_reg,
+    "read-bits": cmd_read_bits,
+    "write-bits": cmd_write_bits,
+    "read-debugfs": cmd_read_debugfs,
+    "list-debugfs": cmd_list_debugfs,
+    "ensure-debugfs": cmd_ensure_debugfs,
+}
+
+
+def main(argv):
+    args = list(argv[1:])
+    dry_run = False
+    if args and args[0] == "--dry-run":
+        dry_run = True
+        args.pop(0)
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if args else 2
+    verb, rest = args[0], args[1:]
+    if verb not in VERBS:
+        die(2, "unknown verb %r (try --help)" % verb)
+    if not dry_run and os.geteuid() != 0:
+        die(3, "must run as root (invoke via pkexec)")
+    return VERBS[verb](rest, dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

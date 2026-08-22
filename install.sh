@@ -131,8 +131,45 @@ else
   fi
 fi
 
-# ---- 3. Optional niceties ---------------------------------------------------
-head "3. Optional extras (nicer names, tray icon)"
+# ---- 3. Privileged helper + polkit policy -----------------------------------
+head "3. Privileged helper"
+say "RedControl runs as your normal user. GPU register access goes through a"
+say "small root helper, authorised by polkit — no sudoers rule is installed."
+if [ ! -f "$HERE/redcontrol-helper" ]; then
+  err "redcontrol-helper is missing from $HERE — cannot continue."
+elif ask "Install redcontrol-helper and its polkit policy?"; then
+  helper_ok=1
+  sudo install -d -m 0755 /usr/libexec || helper_ok=0
+  sudo install -m 0755 -o root -g root "$HERE/redcontrol-helper" \
+       /usr/libexec/redcontrol-helper || helper_ok=0
+  sudo install -d -m 0755 /usr/share/polkit-1/actions || helper_ok=0
+  sudo install -m 0644 -o root -g root "$HERE/org.redcontrol.helper.policy" \
+       /usr/share/polkit-1/actions/org.redcontrol.helper.policy || helper_ok=0
+  if [ "$helper_ok" -eq 1 ]; then
+    ok "helper installed to /usr/libexec/redcontrol-helper"
+    if ! command -v pkexec >/dev/null 2>&1; then
+      warn "pkexec not found — install polkit, or RedControl falls back to sudo."
+    fi
+  else
+    err "helper install failed — RedControl will not be able to reach the GPU."
+  fi
+fi
+
+# Older versions wrote a passwordless sudo rule that also allowed find, cat and
+# mount as root — enough for any local program to obtain a root shell. It is no
+# longer used, so remove it.
+# /etc/sudoers.d is not readable by a normal user, so probe the rule the way
+# sudo would rather than testing for the file.
+if sudo -n /usr/bin/true 2>/dev/null; then
+  warn "An insecure passwordless sudo rule from an earlier version is installed."
+  if ask "Remove /etc/sudoers.d/umr-passwordless now?"; then
+    sudo rm -f /etc/sudoers.d/umr-passwordless && ok "removed" || err "removal failed"
+    sudo -k
+  fi
+fi
+
+# ---- 4. Optional niceties ---------------------------------------------------
+head "4. Optional extras (nicer names, tray icon)"
 if ask "Install optional Python extras (pystray, pillow) for the tray icon?"; then
   # Newer distros (PEP 668, e.g. Ubuntu 24.04 / Mint 22) refuse plain pip installs;
   # --break-system-packages with --user only touches ~/.local, so it's a safe fallback.
@@ -144,7 +181,7 @@ if ask "Install optional Python extras (pystray, pillow) for the tray icon?"; th
   fi
 fi
 
-# ---- 4. Desktop launcher + icon ---------------------------------------------
+# ---- 5. Desktop launcher + icon ---------------------------------------------
 head "4. Menu launcher"
 APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons"
 mkdir -p "$APPS" "$ICONS"
