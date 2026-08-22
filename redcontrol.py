@@ -19895,6 +19895,9 @@ class RedControl:
         self.gpu_selector.pack(side=tk.LEFT, fill="x", expand=True)
         self.gpu_selector.bind("<<ComboboxSelected>>", lambda e: self.switch_gpu())
         self.available_gpus = []
+        # 'mm' on DCN <= 3.0, 'reg' on DCN 3.1.5+ (RDNA 3 refresh, RDNA 4).
+        # Replaced by a probe as soon as a GPU is selected.
+        self.reg_prefix = 'mm'
 
 
 
@@ -20929,6 +20932,35 @@ class RedControl:
         console_print(f"DEBUG: Could not map instance {instance} to PCI, using generic detection")
         return self.get_gpu_name_from_pci()
 
+    def detect_reg_prefix(self):
+        """Work out whether this ASIC names registers mmFOO or regFOO.
+
+        AMD switched the prefix from "mm" to "reg" for newer IP -- DCN 3.1.5
+        and later, including RDNA 4. umr warns and retries across the two, but
+        anything that builds a path itself has to pick the right one, and a
+        probe that guesses wrong reports the GPU as having no outputs.
+        """
+        key = (self.asic_name, self.block_name)
+        cache = getattr(self, '_reg_prefix_cache', None)
+        if cache is None:
+            cache = self._reg_prefix_cache = {}
+        if key in cache:
+            self.reg_prefix = cache[key]
+            return self.reg_prefix
+
+        prefix = 'mm'
+        for candidate in ('mm', 'reg'):
+            path = (f"{self.asic_name}.{self.block_name}."
+                    f"{candidate}FMT0_FMT_BIT_DEPTH_CONTROL")
+            out = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
+            if out and 'not found' not in out.lower():
+                prefix = candidate
+                break
+        cache[key] = prefix
+        self.reg_prefix = prefix
+        self.log_debug(f"register prefix for {self.asic_name}.{self.block_name}: {prefix}")
+        return prefix
+
     def sync_gpu_selector(self):
         """Point the dropdown at the GPU actually in use.
 
@@ -20955,6 +20987,7 @@ class RedControl:
             self.asic_name = gpu['asic']
             self.block_name = gpu['block']
             self.gpu_name = gpu['name']
+            self.detect_reg_prefix()
 
             info = f"GPU: {self.gpu_name} | Display Engine: {self.block_name}"
             self.gpu_info_label.config(text=info if len(self.available_gpus) == 1 else "Select GPU:")
@@ -21097,7 +21130,7 @@ class RedControl:
     def sync_fmt_ui_from_hw(self, idx):
         """Sync the FMT dithering/truncate UI controls for an idx from hardware."""
         try:
-            reg = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+            reg = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
             out = self.run_umr_command(["-i", str(self.gpu_instance), "-O", "bits", "-r", reg])
             if not out:
                 return
@@ -23572,7 +23605,7 @@ sudo -n umr --version
                     block_name = dcn_match.group(2)  # Just the dcn302 part
 
                     # Test if we can read FMT0 register
-                    test_path = f"{asic_name}.{block_name}.mmFMT0_FMT_BIT_DEPTH_CONTROL"
+                    test_path = f"{asic_name}.{block_name}.{self.reg_prefix}FMT0_FMT_BIT_DEPTH_CONTROL"
                     test_output = self.run_umr_command(["-i", str(inst), "-r", test_path])
 
                     if test_output and "=>" in test_output:
@@ -23620,12 +23653,17 @@ sudo -n umr --version
                 self.asic_name = gpu_info['asic']
                 self.block_name = gpu_info['block']
                 self.gpu_name = gpu_info['name']
+                # Probe the naming scheme before looking for outputs: guessing
+                # "mm" on a reg-named ASIC reads nothing and the GPU looks
+                # monitor-less.
+                self.detect_reg_prefix()
+                gpu_info['reg_prefix'] = self.reg_prefix
 
                 # Check if this GPU has any active outputs
                 has_monitors = False
                 connectors = self.get_drm_connectors()
                 for i in range(5):
-                    path = f"{self.asic_name}.{self.block_name}.mmFMT{i}_FMT_BIT_DEPTH_CONTROL"
+                    path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{i}_FMT_BIT_DEPTH_CONTROL"
                     output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
                     if output:
                         match = re.search(r"=> (0x[0-9a-fA-F]+)", output)
@@ -23941,7 +23979,7 @@ sudo -n umr --version
                 connector = crtc_to_connector[crtc_num]
                 fmt_idx = crtc_num  # FMT index typically matches CRTC number
 
-                path = f"{self.asic_name}.{self.block_name}.mmFMT{fmt_idx}_FMT_BIT_DEPTH_CONTROL"
+                path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{fmt_idx}_FMT_BIT_DEPTH_CONTROL"
                 output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
                 if output:
                     match = re.search(r"=> (0x[0-9a-fA-F]+)", output)
@@ -23969,7 +24007,7 @@ sudo -n umr --version
             console_print("DEBUG: No CRTC info available, using assumption-based mapping (FMT index = connector order)")
             # Fall back to old method: assume FMT index matches connector order
             for i in range(len(connected_list)):
-                path = f"{self.asic_name}.{self.block_name}.mmFMT{i}_FMT_BIT_DEPTH_CONTROL"
+                path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{i}_FMT_BIT_DEPTH_CONTROL"
                 output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
                 if output:
                     match = re.search(r"=> (0x[0-9a-fA-F]+)", output)
@@ -25705,21 +25743,21 @@ sudo -n umr --version
         found = []
         for n in range(self.SIG_MAX_ENCODERS):
             fe = self.read_umr_bitfields(
-                f"mmDIG{n}_DIG_FE_CNTL",
+                f"{self.reg_prefix}DIG{n}_DIG_FE_CNTL",
                 ["DIG_SOURCE_SELECT", "DIG_SYMCLK_FE_ON", "TMDS_COLOR_FORMAT"])
             if not fe or fe.get("DIG_SYMCLK_FE_ON") != 1:
                 continue
 
             lanes_reg = self.read_umr_bitfields(
-                f"mmDIG{n}_DIG_LANE_ENABLE",
+                f"{self.reg_prefix}DIG{n}_DIG_LANE_ENABLE",
                 ["DIG_LANE0EN", "DIG_LANE1EN", "DIG_LANE2EN", "DIG_LANE3EN"]) or {}
             lanes = sum(1 for v in lanes_reg.values() if v == 1) if lanes_reg else None
 
-            dp = self.read_umr_bitfields(f"mmDP{n}_DP_VID_STREAM_CNTL",
+            dp = self.read_umr_bitfields(f"{self.reg_prefix}DP{n}_DP_VID_STREAM_CNTL",
                                          ["DP_VID_STREAM_ENABLE"]) or {}
             if dp.get("DP_VID_STREAM_ENABLE") == 1:
                 pf = self.read_umr_bitfields(
-                    f"mmDP{n}_DP_PIXEL_FORMAT",
+                    f"{self.reg_prefix}DP{n}_DP_PIXEL_FORMAT",
                     ["DP_PIXEL_ENCODING", "DP_COMPONENT_DEPTH"]) or {}
                 enc_raw = pf.get("DP_PIXEL_ENCODING")
                 depth_raw = pf.get("DP_COMPONENT_DEPTH")
@@ -25737,7 +25775,7 @@ sudo -n umr --version
                 })
             else:
                 hc = self.read_umr_bitfields(
-                    f"mmDIG{n}_HDMI_CONTROL",
+                    f"{self.reg_prefix}DIG{n}_HDMI_CONTROL",
                     ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH",
                      "HDMI_DATA_SCRAMBLE_EN", "HDMI_CLOCK_CHANNEL_RATE"]) or {}
                 deep_en = hc.get("HDMI_DEEP_COLOR_ENABLE")
@@ -26176,7 +26214,7 @@ sudo -n umr --version
         pipe = info.get('source')
         if pipe is None:
             pipe = idx
-        sf = self.read_umr_bitfields(f"mmHUBP{pipe}_DCSURF_SURFACE_CONFIG",
+        sf = self.read_umr_bitfields(f"{self.reg_prefix}HUBP{pipe}_DCSURF_SURFACE_CONFIG",
                                      ["SURFACE_PIXEL_FORMAT"]) or {}
         fmt_raw = sf.get("SURFACE_PIXEL_FORMAT")
         fmt_names = {
@@ -26194,23 +26232,23 @@ sudo -n umr --version
 
         # Color-management LUTs touching this pipe (driver gamma/CM stages)
         luts = []
-        cm = self.read_umr_bitfields(f"mmCM{pipe}_CM_GAMCOR_CONTROL",
+        cm = self.read_umr_bitfields(f"{self.reg_prefix}CM{pipe}_CM_GAMCOR_CONTROL",
                                      ["CM_GAMCOR_MODE"]) or {}
         if cm.get("CM_GAMCOR_MODE"):
             luts.append("gamma correction")
-        sh = self.read_umr_bitfields(f"mmCM{pipe}_CM_SHAPER_CONTROL",
+        sh = self.read_umr_bitfields(f"{self.reg_prefix}CM{pipe}_CM_SHAPER_CONTROL",
                                      ["CM_SHAPER_LUT_MODE", "CM_SHAPER_MODE"]) or {}
         if sh.get("CM_SHAPER_LUT_MODE") or sh.get("CM_SHAPER_MODE"):
             luts.append("shaper")
-        bg3 = self.read_umr_bitfields(f"mmCM{pipe}_CM_BLNDGAM_CONTROL",
+        bg3 = self.read_umr_bitfields(f"{self.reg_prefix}CM{pipe}_CM_BLNDGAM_CONTROL",
                                       ["CM_BLNDGAM_MODE"]) or {}
         if bg3.get("CM_BLNDGAM_MODE"):
             luts.append("blend gamma")
-        l3d = self.read_umr_bitfields(f"mmCM{pipe}_CM_3DLUT_MODE",
+        l3d = self.read_umr_bitfields(f"{self.reg_prefix}CM{pipe}_CM_3DLUT_MODE",
                                       ["CM_3DLUT_MODE"]) or {}
         if l3d.get("CM_3DLUT_MODE"):
             luts.append("3D LUT")
-        og = self.read_umr_bitfields(f"mmMPCC_OGAM{pipe}_MPCC_OGAM_CONTROL",
+        og = self.read_umr_bitfields(f"{self.reg_prefix}MPCC_OGAM{pipe}_MPCC_OGAM_CONTROL",
                                      ["MPCC_OGAM_MODE"]) or {}
         if og.get("MPCC_OGAM_MODE"):
             luts.append("output gamma")
@@ -26222,9 +26260,9 @@ sudo -n umr --version
             w['gamma_label'].config(text="Color LUTs:  all bypassed")
 
         # CSC matrix / gamut remap (read-only: OCSC also does range conversion)
-        csc = self.read_umr_bitfields(f"mmMPC_OUT{pipe}_CSC_MODE",
+        csc = self.read_umr_bitfields(f"{self.reg_prefix}MPC_OUT{pipe}_CSC_MODE",
                                       ["MPC_OCSC_MODE"]) or {}
-        gr = self.read_umr_bitfields(f"mmCM{pipe}_CM_GAMUT_REMAP_CONTROL",
+        gr = self.read_umr_bitfields(f"{self.reg_prefix}CM{pipe}_CM_GAMUT_REMAP_CONTROL",
                                      ["CM_GAMUT_REMAP_MODE"]) or {}
         if not (csc or gr):
             w['csc_label'].config(text="CSC / Gamut:  unknown")
@@ -26234,7 +26272,7 @@ sudo -n umr --version
             w['csc_label'].config(text=f"CSC / Gamut:  {csc_txt} · {gr_txt}")
 
         # Scaler + refresh timing (interpolation / DRR frame modulation)
-        scl = self.read_umr_bitfields(f"mmDSCL{pipe}_SCL_MODE", ["DSCL_MODE"]) or {}
+        scl = self.read_umr_bitfields(f"{self.reg_prefix}DSCL{pipe}_SCL_MODE", ["DSCL_MODE"]) or {}
         scl_mode = scl.get("DSCL_MODE")
         if scl_mode is None:
             scl_txt = "unknown"
@@ -26242,7 +26280,7 @@ sudo -n umr --version
             scl_txt = "bypassed (native)"
         else:
             scl_txt = f"active (mode {scl_mode})"
-        vt = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_V_TOTAL_CONTROL",
+        vt = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_V_TOTAL_CONTROL",
                                      ["OTG_V_TOTAL_MIN_SEL", "OTG_V_TOTAL_MAX_SEL"]) or {}
         if not vt:
             vt_txt = "V-total unknown"
@@ -26253,7 +26291,7 @@ sudo -n umr --version
         w['scaler_label'].config(text=f"Scaler:  {scl_txt} · {vt_txt}")
 
         # Dynamic expansion state → sync the toggle (no command fires on .set())
-        de = self.read_umr_bitfields(f"mmFMT{pipe}_FMT_DYNAMIC_EXP_CNTL",
+        de = self.read_umr_bitfields(f"{self.reg_prefix}FMT{pipe}_FMT_DYNAMIC_EXP_CNTL",
                                      ["FMT_DYNAMIC_EXP_EN"]) or {}
         if "FMT_DYNAMIC_EXP_EN" in de:
             w['dynexp_var'].set(de["FMT_DYNAMIC_EXP_EN"] == 1)
@@ -26309,9 +26347,9 @@ sudo -n umr --version
             val = {v: k for k, v in self.DP_DEPTH_MAP.items()}.get(label)
             if val is None:
                 return
-            path = f"{self.asic_name}.{self.block_name}.mmDP{enc}_DP_PIXEL_FORMAT"
+            path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}DP{enc}_DP_PIXEL_FORMAT"
 
-            pf = self.read_umr_bitfields(f"mmDP{enc}_DP_PIXEL_FORMAT",
+            pf = self.read_umr_bitfields(f"{self.reg_prefix}DP{enc}_DP_PIXEL_FORMAT",
                                          ["DP_COMPONENT_DEPTH"]) or {}
             old_val = pf.get("DP_COMPONENT_DEPTH")
             if old_val == val:
@@ -26350,12 +26388,12 @@ sudo -n umr --version
         if val is None:
             return
 
-        hc = self.read_umr_bitfields(f"mmDIG{enc}_HDMI_CONTROL",
+        hc = self.read_umr_bitfields(f"{self.reg_prefix}DIG{enc}_HDMI_CONTROL",
                                      ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH"]) or {}
         old_en = hc.get("HDMI_DEEP_COLOR_ENABLE", 0)
         old_depth = hc.get("HDMI_DEEP_COLOR_DEPTH", 0)
 
-        path = f"{self.asic_name}.{self.block_name}.mmDIG{enc}_HDMI_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}DIG{enc}_HDMI_CONTROL"
         new_en = 0 if val == 0 else 1
 
         def write_pair(en, depth):
@@ -26498,9 +26536,9 @@ sudo -n umr --version
         if m:
             hres, vres = int(m.group(1)), int(m.group(2))
 
-        base = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC_CNTL"
-        winx = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC0_WINDOWA_X_CONTROL"
-        winy = f"{self.asic_name}.{self.block_name}.mmOTG{pipe}_OTG_CRC0_WINDOWA_Y_CONTROL"
+        base = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}OTG{pipe}_OTG_CRC_CNTL"
+        winx = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}OTG{pipe}_OTG_CRC0_WINDOWA_X_CONTROL"
+        winy = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}OTG{pipe}_OTG_CRC0_WINDOWA_Y_CONTROL"
         for reg_field, val in [
             (f"{winx}.OTG_CRC0_WINDOWA_X_START", "0"),
             (f"{winx}.OTG_CRC0_WINDOWA_X_END", str(hres)),
@@ -26521,9 +26559,9 @@ sudo -n umr --version
             _lbl0.config(text="Testing…  keep the screen completely still", fg=self.fg)
 
         def _sample(n=0):
-            rg = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_CRC0_DATA_RG",
+            rg = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_CRC0_DATA_RG",
                                          ["CRC0_R_CR", "CRC0_G_Y"]) or {}
-            b = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_CRC0_DATA_B",
+            b = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_CRC0_DATA_B",
                                         ["CRC0_B_CB"]) or {}
             if rg or b:
                 samples.append((rg.get("CRC0_R_CR"), rg.get("CRC0_G_Y"),
@@ -26580,7 +26618,7 @@ sudo -n umr --version
         if pipe is None:
             pipe = idx
         val = 1 if w['dynexp_var'].get() else 0
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{pipe}_FMT_DYNAMIC_EXP_CNTL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{pipe}_FMT_DYNAMIC_EXP_CNTL"
         self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
                               f"{path}.FMT_DYNAMIC_EXP_EN", str(val)])
         self.log_command(f"{connector_name}: Dynamic Expansion",
@@ -26599,10 +26637,10 @@ sudo -n umr --version
             pipe = idx
 
         lut_regs = {
-            'gamcor': (f"mmCM{pipe}_CM_GAMCOR_CONTROL", "CM_GAMCOR_MODE"),
-            'blndgam': (f"mmCM{pipe}_CM_BLNDGAM_CONTROL", "CM_BLNDGAM_MODE"),
-            'lut3d': (f"mmCM{pipe}_CM_3DLUT_MODE", "CM_3DLUT_MODE"),
-            'ogam': (f"mmMPCC_OGAM{pipe}_MPCC_OGAM_CONTROL", "MPCC_OGAM_MODE"),
+            'gamcor': (f"{self.reg_prefix}CM{pipe}_CM_GAMCOR_CONTROL", "CM_GAMCOR_MODE"),
+            'blndgam': (f"{self.reg_prefix}CM{pipe}_CM_BLNDGAM_CONTROL", "CM_BLNDGAM_MODE"),
+            'lut3d': (f"{self.reg_prefix}CM{pipe}_CM_3DLUT_MODE", "CM_3DLUT_MODE"),
+            'ogam': (f"{self.reg_prefix}MPCC_OGAM{pipe}_MPCC_OGAM_CONTROL", "MPCC_OGAM_MODE"),
         }
 
         if w['lut_bypass_var'].get():
@@ -26660,7 +26698,7 @@ sudo -n umr --version
         w['mrefresh_label'].config(text="Measured Refresh:  measuring…")
 
         t0a = _time.monotonic()
-        r0 = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_STATUS_FRAME_COUNT",
+        r0 = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_STATUS_FRAME_COUNT",
                                      ["OTG_FRAME_COUNT"])
         t0b = _time.monotonic()
         if not r0:
@@ -26670,7 +26708,7 @@ sudo -n umr --version
 
         def _finish():
             t1a = _time.monotonic()
-            r1 = self.read_umr_bitfields(f"mmOTG{pipe}_OTG_STATUS_FRAME_COUNT",
+            r1 = self.read_umr_bitfields(f"{self.reg_prefix}OTG{pipe}_OTG_STATUS_FRAME_COUNT",
                                          ["OTG_FRAME_COUNT"])
             t1b = _time.monotonic()
             if not r1:
@@ -26737,7 +26775,7 @@ sudo -n umr --version
         value the GPU does not have -- a silent no-op (write refused, or the
         driver undoing it) previously left the UI lying about the register.
         """
-        reg_name = f"mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg_name = f"{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         path = f"{self.asic_name}.{self.block_name}.{reg_name}"
         connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx, f"FMT{idx}")
 
@@ -26825,7 +26863,7 @@ sudo -n umr --version
                 self.log_debug(f"auto-reapply check FMT{idx} failed: {exc}")
 
     def _reapply_check_output(self, idx):
-        reg_name = f"mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg_name = f"{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         reg = f"{self.asic_name}.{self.block_name}.{reg_name}"
         wanted = {}
         for store, field in self.REAPPLY_FIELDS:
@@ -26868,7 +26906,7 @@ sudo -n umr --version
             return
 
         # A modeset can move the pipe to a different DIG — validate before writing
-        fe = self.read_umr_bitfields(f"mmDIG{enc}_DIG_FE_CNTL",
+        fe = self.read_umr_bitfields(f"{self.reg_prefix}DIG{enc}_DIG_FE_CNTL",
                                      ["DIG_SYMCLK_FE_ON", "DIG_SOURCE_SELECT"])
         if not fe or fe.get("DIG_SYMCLK_FE_ON") != 1 or fe.get("DIG_SOURCE_SELECT") != idx:
             self.refresh_signal_panel(idx, connector_name)
@@ -26878,11 +26916,11 @@ sudo -n umr --version
             target = {v: k for k, v in self.DP_DEPTH_MAP.items()}.get(label)
             if target is None:
                 return
-            pf = self.read_umr_bitfields(f"mmDP{enc}_DP_PIXEL_FORMAT",
+            pf = self.read_umr_bitfields(f"{self.reg_prefix}DP{enc}_DP_PIXEL_FORMAT",
                                          ["DP_COMPONENT_DEPTH"])
             if pf is None or pf.get("DP_COMPONENT_DEPTH") == target:
                 return
-            path = f"{self.asic_name}.{self.block_name}.mmDP{enc}_DP_PIXEL_FORMAT"
+            path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}DP{enc}_DP_PIXEL_FORMAT"
             self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
                                   f"{path}.DP_COMPONENT_DEPTH", str(target)])
             self.log_command(f"{connector_name}: DP Component Depth (pin)",
@@ -26894,14 +26932,14 @@ sudo -n umr --version
             if target is None:
                 return
             want_en = 0 if target == 0 else 1
-            hc = self.read_umr_bitfields(f"mmDIG{enc}_HDMI_CONTROL",
+            hc = self.read_umr_bitfields(f"{self.reg_prefix}DIG{enc}_HDMI_CONTROL",
                                          ["HDMI_DEEP_COLOR_ENABLE", "HDMI_DEEP_COLOR_DEPTH"])
             if hc is None:
                 return
             if (hc.get("HDMI_DEEP_COLOR_ENABLE") == want_en
                     and (want_en == 0 or hc.get("HDMI_DEEP_COLOR_DEPTH") == target)):
                 return
-            path = f"{self.asic_name}.{self.block_name}.mmDIG{enc}_HDMI_CONTROL"
+            path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}DIG{enc}_HDMI_CONTROL"
             self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
                                   f"{path}.HDMI_DEEP_COLOR_DEPTH", str(target)])
             self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
@@ -26946,7 +26984,7 @@ sudo -n umr --version
             depth_str = var.get() if var else '8-bit'
 
         depth_val = self.DITHER_DEPTH_REVERSE.get(depth_str, 1)
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         if not self.write_field_verified(
                 idx, "FMT_SPATIAL_DITHER_DEPTH", depth_val,
                 var_store='spatial_depth_vars',
@@ -26959,7 +26997,7 @@ sudo -n umr --version
     def set_spatial_mode(self, idx, mode_str):
         """Set spatial dither mode"""
         mode_val = int(mode_str.split()[-1])  # Extract number from "Mode X"
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         if not self.write_field_verified(
                 idx, "FMT_SPATIAL_DITHER_MODE", mode_val,
                 var_store='spatial_mode_vars',
@@ -26972,7 +27010,7 @@ sudo -n umr --version
     def set_temporal_depth(self, idx, depth_str):
         """Set temporal dither depth"""
         depth_val = self.DITHER_DEPTH_REVERSE.get(depth_str, 1)
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         if not self.write_field_verified(
                 idx, "FMT_TEMPORAL_DITHER_DEPTH", depth_val,
                 var_store='temporal_depth_vars',
@@ -26984,7 +27022,7 @@ sudo -n umr --version
 
     def set_temporal_offset(self, idx, offset_val):
         """Set temporal dither offset"""
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         if not self.write_field_verified(
                 idx, "FMT_TEMPORAL_DITHER_OFFSET", offset_val,
                 var_store='temporal_offset_vars',
@@ -26996,7 +27034,7 @@ sudo -n umr --version
 
     def toggle_setting(self, idx, bitfield, value):
         """Toggle setting with debug logging"""
-        reg_name = f"mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        reg_name = f"{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         path = f"{self.asic_name}.{self.block_name}.{reg_name}"
         val = 1 if value else 0
 
@@ -27068,7 +27106,7 @@ sudo -n umr --version
             depth_str = var.get() if var else '8-bit'
 
         depth_val = self.TRUNCATE_DEPTH_REVERSE.get(depth_str, 1)
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
 
         # Get current value for logging
         connector_name = self.monitor_connector_names.get(idx, f"FMT{idx}")
@@ -27098,7 +27136,7 @@ sudo -n umr --version
             mode_str = var.get() if var else 'Truncate'
 
         mode_val = self.TRUNCATE_MODE_REVERSE.get(mode_str, 0)
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
 
         # Get current value for logging
         connector_name = self.monitor_connector_names.get(idx, f"FMT{idx}")
@@ -27122,7 +27160,7 @@ sudo -n umr --version
 
     def disable_all(self, idx):
         """Disable all"""
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         for bf in ["FMT_SPATIAL_DITHER_EN", "FMT_TEMPORAL_DITHER_EN",
                    "FMT_RGB_RANDOM_ENABLE", "FMT_HIGHPASS_RANDOM_ENABLE",
                    "FMT_FRAME_RANDOM_ENABLE"]:
@@ -27138,7 +27176,7 @@ sudo -n umr --version
                 "Try scanning outputs again.")
             return
 
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         initial = self.initial_values[f"FMT{idx}"]
 
         # Restore checkboxes and update UI
@@ -27218,7 +27256,7 @@ sudo -n umr --version
 
     def refresh_status(self, idx, save_initial=False):
         """Refresh status and optionally save initial hardware state"""
-        path = f"{self.asic_name}.{self.block_name}.mmFMT{idx}_FMT_BIT_DEPTH_CONTROL"
+        path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
         output = self.run_umr_command(["-i", str(self.gpu_instance), "-O", "bits", "-r", path])
 
         if not output:

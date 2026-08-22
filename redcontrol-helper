@@ -56,11 +56,14 @@ RE_FIELD = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 # These cover exactly what RedControl writes: FMT dithering/truncation, DP
 # component depth, HDMI deep colour, and the OTG CRC engine used by the static
 # signal test.
+# AMD renamed the register prefix from "mm" to "reg" for newer IP (DCN 3.1.5
+# and later, including RDNA 4); umr accepts either and retries across them, so
+# both spellings must be allowed or those ASICs are refused outright.
 WRITE_REGISTER_ALLOW = [
-    r"^mmFMT[0-9]*_FMT_[A-Z0-9_]+$",
-    r"^mmDP[0-9]*_DP_PIXEL_FORMAT$",
-    r"^mmDIG[0-9]*_HDMI_CONTROL$",
-    r"^mmOTG[0-9]*_OTG_CRC[0-9A-Z_]*$",
+    r"^(mm|reg)FMT[0-9]*_FMT_[A-Z0-9_]+$",
+    r"^(mm|reg)DP[0-9]*_DP_PIXEL_FORMAT$",
+    r"^(mm|reg)DIG[0-9]*_HDMI_CONTROL$",
+    r"^(mm|reg)OTG[0-9]*_OTG_CRC[0-9A-Z_]*$",
 ]
 WRITE_FIELD_ALLOW = [
     r"^FMT_[A-Z0-9_]+$",
