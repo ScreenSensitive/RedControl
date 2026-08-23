@@ -24,7 +24,7 @@ git clone <this-repo-url> RedControl && cd RedControl
 ./install.sh
 ```
 
-`install.sh` verifies Python/Tkinter, installs **umr** (the one required dependency) for your distro — or builds it from source — adds an app-menu launcher, and offers to launch. Prefer to do it by hand? See [Requirements](#requirements).
+`install.sh` verifies Python/Tkinter, installs **umr** — or builds it from source — installs the privileged helper and its polkit policy (this step asks for your password once), adds an app-menu launcher, and offers to launch. Prefer to do it by hand? See [Requirements](#requirements) and [How RedControl gets permission](#how-redcontrol-gets-permission).
 
 ## Features
 
@@ -51,8 +51,16 @@ All AMD GPUs with a DCN (Display Core Next) display engine:
 - **RDNA 1**: Navi 10, 12, 14 (RX 5000 series)
 - **RDNA 2**: Navi 21, 22, 23, 24 (RX 6000 series)
 - **RDNA 3**: Navi 31, 32, 33 (RX 7000 series)
+- **RDNA 4**: Navi 48 (RX 9000 series) — untested; see note below
 - **APUs**: Renoir, Cezanne, Rembrandt, Phoenix (Ryzen 4000–7000 integrated graphics)
 
+> **Newer ASICs:** AMD renamed the register prefix from `mm` to `reg` on DCN 3.1.5
+> and later, including RDNA 4. RedControl probes for this rather than assuming, and
+> takes the ASIC name, display block and register layout from umr at runtime, so
+> nothing is hardcoded to one generation. Whether RDNA 4 works therefore comes down
+> to whether your umr build carries the DCN 4 register tables. If it does not, the
+> tool reports a read failure in Diagnostics rather than misbehaving.
+>
 > **Tested on:** CachyOS (Arch Linux), Cinnamon on **X11**, with an **RX 6600** (RDNA 2) and **Radeon 780M** (RDNA 3 / Phoenix APU). Other AMD GPUs share the same DCN display engine and *should* work, and other distros/desktops should too — but only the above is verified. **X11 is recommended**; the xrandr-based controls (resolution, refresh, scaling, Broadcast RGB) need X11, though core dithering and the DP/HDMI signal panel also work on Wayland. Reports from other setups welcome.
 
 ## Requirements
@@ -84,6 +92,44 @@ git clone https://gitlab.freedesktop.org/tomstdenis/umr.git
 cd umr && cmake -S . -B build -DUMR_NO_GUI=ON -DUMR_NO_LLVM=ON
 make -C build -j"$(nproc)" && sudo make -C build install
 ```
+
+## How RedControl gets permission
+
+Reading and writing GPU registers needs root. RedControl does **not** run as root
+and does not install a passwordless sudo rule.
+
+Instead `install.sh` places a small helper at `/usr/libexec/redcontrol-helper`
+(root-owned) plus a polkit policy. The GUI runs as your normal user and asks the
+helper to perform a fixed set of operations — read a register, write one of the
+display bitfields, read a file under `/sys/kernel/debug/dri`. The helper builds
+the `umr` command itself and refuses anything outside that set, so the GUI never
+passes a command line across the privilege boundary.
+
+polkit asks you to authenticate **once per login session** (`auth_admin_keep`).
+If you would rather not be asked at all, Settings → *Never ask for authentication
+on this machine* installs a polkit rule granting this one action to
+administrators in a local session. That is far narrower than passwordless sudo:
+the helper only accepts the operations above, and the register allowlist is
+enforced regardless.
+
+> **Upgrading from v1.0:** that release added
+> `/etc/sudoers.d/umr-passwordless`, which also granted passwordless `find`,
+> `cat` and `mount` — enough for any program running as you to obtain a root
+> shell. RedControl offers to remove it on first run, and `install.sh` does too.
+> To remove it by hand: `sudo rm /etc/sudoers.d/umr-passwordless`
+
+### Updating
+
+Pull, then re-run `./install.sh` so the helper is updated alongside the app. The
+app checks the helper's version at startup and warns if it is older than it
+expects; a stale helper can refuse settings the newer GUI knows about.
+
+### Troubleshooting
+
+**Settings → Diagnostics…** shows what the tool is actually targeting: the ASIC
+and display block, the detected register prefix, which FMT pipe each monitor
+resolves to, and every pipe's state. **Copy** puts the report on the clipboard —
+please include it in bug reports.
 
 ## Usage
 
