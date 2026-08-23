@@ -26316,6 +26316,33 @@ sudo -n umr --version
                           f"saw {sorted(parsed)[:8]}; raw={output.strip()[:300]!r}")
         return result if result else None
 
+    def read_bits_all_instances(self, suffix, fields):
+        """One read for every instance of a register: {index: {field: value}}.
+
+        Omitting the instance number makes umr dump the whole family, so
+        scanning six encoders costs one privileged call instead of six.
+        """
+        path = f"{self.asic_name}.{self.block_name}.{suffix}"
+        out = self.run_umr_command(
+            ["-i", str(self.gpu_instance), "-O", "bits", "-r", path]) or ""
+        blocks, current = {}, None
+        for line in out.splitlines():
+            head = re.match(r"\s*\S*?(?:mm|reg)([A-Z]+)(\d+)_\S*\s*=>", line)
+            if head:
+                current = int(head.group(2))
+                blocks[current] = {}
+                continue
+            if current is None:
+                continue
+            m = re.match(r"\s*\.?([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\d+\s*:\s*\d+\s*\]"
+                         r"\s*==\s*(0x[0-9a-fA-F]+|\d+)", line)
+            if m and m.group(1) in fields:
+                try:
+                    blocks[current][m.group(1)] = int(m.group(2), 0)
+                except ValueError:
+                    pass
+        return blocks
+
     @staticmethod
     def parse_umr_bits(output):
         """Parse every field out of `umr -O bits` output.
@@ -26454,10 +26481,12 @@ sudo -n umr --version
          encoding, depth, depth_raw}
         """
         found = []
+        # One call for every DIG rather than one per encoder.
+        all_fe = self.read_bits_all_instances(
+            "DIG_FE_CNTL",
+            ("DIG_SOURCE_SELECT", "DIG_SYMCLK_FE_ON", "TMDS_COLOR_FORMAT"))
         for n in range(self.SIG_MAX_ENCODERS):
-            fe = self.read_umr_bitfields(
-                f"{self.reg_prefix}DIG{n}_DIG_FE_CNTL",
-                ["DIG_SOURCE_SELECT", "DIG_SYMCLK_FE_ON", "TMDS_COLOR_FORMAT"])
+            fe = all_fe.get(n)
             if not fe or fe.get("DIG_SYMCLK_FE_ON") != 1:
                 continue
 
