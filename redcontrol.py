@@ -20560,11 +20560,15 @@ class RedControl:
                       'read-bits': 0.75,
                       'read-reg': 0.75}
 
-    def run_helper(self, verb, *args, timeout=20):
-        """Run a single helper verb. Returns stdout, or None on failure."""
+    def run_helper(self, verb, *args, timeout=20, fresh=False):
+        """Run a single helper verb. Returns stdout, or None on failure.
+
+        fresh=True bypasses the cache for callers that must see the register as
+        it is right now, not as it was up to a cache lifetime ago.
+        """
         ttl = self.HELPER_CACHE_S.get(verb, 0)
         key = None
-        if ttl != 0:
+        if ttl != 0 and not fresh:
             key = (verb,) + tuple(str(a) for a in args)
             cache = getattr(self, '_helper_cache', None)
             if cache is None:
@@ -20575,6 +20579,10 @@ class RedControl:
         if verb == 'write-bits':
             self.invalidate_helper_cache()
         result = self._run_helper_uncached(verb, *args, timeout=timeout)
+        if fresh and ttl != 0:
+            key = (verb,) + tuple(str(a) for a in args)
+            if getattr(self, '_helper_cache', None) is None:
+                self._helper_cache = {}
         if key is not None and result is not None:
             self._helper_cache[key] = (time.time(), result)
         return result
@@ -20960,7 +20968,7 @@ class RedControl:
         self._xrandr_props_cache = (now, out)
         return out
 
-    def run_umr_command(self, args):
+    def run_umr_command(self, args, fresh=False):
         """Translate a umr argument list into a redcontrol-helper verb.
 
         Call sites still speak umr's argument syntax, but nothing here reaches
@@ -20983,10 +20991,10 @@ class RedControl:
             if argv == ["--list-blocks"]:
                 return self.run_helper("list-blocks", inst)
             if len(argv) == 2 and argv[0] == "-r":
-                return self.run_helper("read-reg", inst, argv[1])
+                return self.run_helper("read-reg", inst, argv[1], fresh=fresh)
             if (len(argv) == 4 and argv[0] == "-O" and argv[1] == "bits"
                     and argv[2] == "-r"):
-                return self.run_helper("read-bits", inst, argv[3])
+                return self.run_helper("read-bits", inst, argv[3], fresh=fresh)
             if len(argv) == 3 and argv[0] == "-wb":
                 return self.run_helper("write-bits", inst, argv[1], argv[2])
 
@@ -26308,11 +26316,12 @@ sudo -n umr --version
     TMDS_FORMAT_MAP = {0: "RGB 4:4:4", 1: "YCbCr 4:2:2", 2: "YCbCr 4:4:4"}
     SIG_MAX_ENCODERS = 6  # DIG0..DIG5 probed via UMR
 
-    def read_umr_bitfields(self, reg_name, fields):
+    def read_umr_bitfields(self, reg_name, fields, fresh=False):
         """Read a register with `umr -O bits` and return {field: int} for the
         requested bitfields, or None if the register could not be read."""
         path = f"{self.asic_name}.{self.block_name}.{reg_name}"
-        output = self.run_umr_command(["-i", str(self.gpu_instance), "-O", "bits", "-r", path])
+        output = self.run_umr_command(["-i", str(self.gpu_instance), "-O", "bits", "-r", path],
+                                      fresh=fresh)
         if not output:
             return None
         parsed = self.parse_umr_bits(output)
@@ -27623,7 +27632,7 @@ sudo -n umr --version
         # already holds those values; each pointless write also cost a
         # verification read. Check first -- the read is cached, so a batch of
         # fields costs one call rather than two per field.
-        already = (self.read_umr_bitfields(reg_name, [field]) or {}).get(field)
+        already = (self.read_umr_bitfields(reg_name, [field], fresh=True) or {}).get(field)
         if already is not None and int(already) == int(value):
             self.clear_control_failure(idx, field)
             return True
@@ -28131,7 +28140,7 @@ sudo -n umr --version
         after_str = 'ON' if value else 'OFF'
 
         # Nothing to do if the register already holds this value.
-        already = (self.read_umr_bitfields(reg_name, [bitfield]) or {}).get(bitfield)
+        already = (self.read_umr_bitfields(reg_name, [bitfield], fresh=True) or {}).get(bitfield)
         if already is not None and int(already) == val:
             self.clear_control_failure(idx, bitfield)
             self.status_var.set(f"{bitfield} already {val}")
