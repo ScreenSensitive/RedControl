@@ -20547,8 +20547,42 @@ class RedControl:
             return local
         return None
 
+    # Results that cannot change while the process runs, or that a burst of
+    # UI work re-requests within a second or two. Every call is a pkexec plus a
+    # umr process, and startup was issuing 176 of them.
+    HELPER_CACHE_S = {'enumerate': None,        # None = forever
+                      'list-blocks': None,
+                      'list-debugfs': 5.0,
+                      'read-debugfs': 2.0,
+                      # Register reads are cached only briefly, and any write
+                      # clears the cache, so a verification read never sees a
+                      # value from before its own write.
+                      'read-bits': 0.75,
+                      'read-reg': 0.75}
+
     def run_helper(self, verb, *args, timeout=20):
         """Run a single helper verb. Returns stdout, or None on failure."""
+        ttl = self.HELPER_CACHE_S.get(verb, 0)
+        key = None
+        if ttl != 0:
+            key = (verb,) + tuple(str(a) for a in args)
+            cache = getattr(self, '_helper_cache', None)
+            if cache is None:
+                cache = self._helper_cache = {}
+            hit = cache.get(key)
+            if hit is not None and (ttl is None or time.time() - hit[0] < ttl):
+                return hit[1]
+        if verb == 'write-bits':
+            self.invalidate_helper_cache()
+        result = self._run_helper_uncached(verb, *args, timeout=timeout)
+        if key is not None and result is not None:
+            self._helper_cache[key] = (time.time(), result)
+        return result
+
+    def invalidate_helper_cache(self):
+        self._helper_cache = {}
+
+    def _run_helper_uncached(self, verb, *args, timeout=20):
         helper = self.helper_path()
         if helper is None:
             self.report_helper_missing()
@@ -27549,6 +27583,15 @@ sudo -n umr --version
         path = f"{self.asic_name}.{self.block_name}.{reg_name}"
         connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx, f"FMT{idx}")
 
+        # Restoring saved settings rewrites every field even when the register
+        # already holds those values; each pointless write also cost a
+        # verification read. Check first -- the read is cached, so a batch of
+        # fields costs one call rather than two per field.
+        already = (self.read_umr_bitfields(reg_name, [field]) or {}).get(field)
+        if already is not None and int(already) == int(value):
+            self.clear_control_failure(idx, field)
+            return True
+
         wrote = self.run_umr_command(
             ["-i", str(self.gpu_instance), "-wb", f"{path}.{field}", str(value)])
         actual = None
@@ -28051,7 +28094,13 @@ sudo -n umr --version
         before_str = 'ON' if not value else 'OFF'
         after_str = 'ON' if value else 'OFF'
 
-        # Run command
+        # Nothing to do if the register already holds this value.
+        already = (self.read_umr_bitfields(reg_name, [bitfield]) or {}).get(bitfield)
+        if already is not None and int(already) == val:
+            self.clear_control_failure(idx, bitfield)
+            self.status_var.set(f"{bitfield} already {val}")
+            return
+
         wrote = self.run_umr_command(
             ["-i", str(self.gpu_instance), "-wb", f"{path}.{bitfield}", str(val)])
 
