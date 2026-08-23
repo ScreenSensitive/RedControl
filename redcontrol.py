@@ -19,6 +19,7 @@ import base64
 import io
 import types
 import tempfile
+import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -19417,8 +19418,7 @@ class RedControl:
         # Auto-Reapply persists across restarts, so start its watchdog here
         # rather than waiting for a forced depth to start the tick loop.
         try:
-            if self.auto_reapply_enabled():
-                self.root.after(2400, self._start_signal_pin_watchdog)
+            self.root.after(2400, self.start_fmt_watchdog)
         except Exception:
             pass
 
@@ -20511,6 +20511,10 @@ class RedControl:
             first_time = not self._helper_authorized
             self._helper_authorized = True
             if first_time:
+                try:
+                    self.root.after(200, self.start_fmt_watchdog)
+                except Exception:
+                    pass
                 # Reads that ran before authorisation returned nothing, and the
                 # controls that consume them fail silently -- leaving every
                 # switch showing its default (off) whatever the hardware says.
@@ -27332,14 +27336,294 @@ sudo -n umr --version
         'FMT_TRUNCATE_EN': 'truncate_vars',
     }
 
-    REAPPLY_FIELDS = (
-        ('spatial_vars', 'FMT_SPATIAL_DITHER_EN'),
-        ('temporal_vars', 'FMT_TEMPORAL_DITHER_EN'),
-        ('rgb_random_vars', 'FMT_RGB_RANDOM_ENABLE'),
+
+    FMT_WATCH_BOOL_FIELDS = (
+        ('spatial_vars',         'FMT_SPATIAL_DITHER_EN'),
+        ('temporal_vars',        'FMT_TEMPORAL_DITHER_EN'),
+        ('rgb_random_vars',      'FMT_RGB_RANDOM_ENABLE'),
         ('highpass_random_vars', 'FMT_HIGHPASS_RANDOM_ENABLE'),
-        ('frame_random_vars', 'FMT_FRAME_RANDOM_ENABLE'),
-        ('truncate_vars', 'FMT_TRUNCATE_EN'),
+        ('frame_random_vars',    'FMT_FRAME_RANDOM_ENABLE'),
+        ('truncate_vars',        'FMT_TRUNCATE_EN'),
     )
+
+    FMT_WATCH_ENUM_FIELDS = (
+        ('truncate_depth_vars',  'FMT_TRUNCATE_DEPTH',        'TRUNCATE_DEPTH_REVERSE'),
+        ('truncate_mode_vars',   'FMT_TRUNCATE_MODE',         'TRUNCATE_MODE_REVERSE'),
+        ('spatial_depth_vars',   'FMT_SPATIAL_DITHER_DEPTH',  'DITHER_DEPTH_REVERSE'),
+        ('temporal_depth_vars',  'FMT_TEMPORAL_DITHER_DEPTH', 'DITHER_DEPTH_REVERSE'),
+    )
+
+    FMT_FIELD_BITS_FALLBACK = {
+        'FMT_TRUNCATE_EN':            (0, 1),
+        'FMT_TRUNCATE_MODE':          (1, 1),
+        'FMT_TRUNCATE_DEPTH':         (4, 2),
+        'FMT_SPATIAL_DITHER_EN':      (8, 1),
+        'FMT_SPATIAL_DITHER_DEPTH':  (11, 2),
+        'FMT_FRAME_RANDOM_ENABLE':   (13, 1),
+        'FMT_RGB_RANDOM_ENABLE':     (14, 1),
+        'FMT_HIGHPASS_RANDOM_ENABLE':(15, 1),
+        'FMT_TEMPORAL_DITHER_EN':    (16, 1),
+        'FMT_TEMPORAL_DITHER_DEPTH': (17, 2),
+    }
+
+    # ---- FMT watchdog -------------------------------------------------------
+    # Ported from the signal-pixel-encoding branch, which solved this properly:
+    # polling happens off the Tk thread with adaptive backoff, the bit layout is
+    # parsed from umr rather than hardcoded, and drift is corrected by packing
+    # and writing the whole register instead of one field at a time.
+    #
+    # Adapted here to reach the GPU through redcontrol-helper. The original ran
+    # `sudo -n umr` directly; this build has no passwordless sudo, so the
+    # background poller stays idle until polkit has authorised the helper and
+    # never triggers an auth dialog from a thread.
+
+    FMT_WATCH_INTERVAL_MS = 3000        # base cadence, when something is moving
+    FMT_WATCH_IDLE_MAX_MS = 15000       # backoff ceiling while nothing changes
+    FMT_REGISTER = "FMT_BIT_DEPTH_CONTROL"
+
+    def _umr_background(self, args):
+        """Run a umr read for the poller. Never prompts; fails closed."""
+        if os.geteuid() != 0 and not getattr(self, '_helper_authorized', False):
+            return None
+        return self.run_umr_command(args)
+
+    def _fmt_bit_layout(self):
+        """field -> (lsb, width), as reported by umr; cached for the session.
+
+        Parsed from `umr -O bits`, which prints each field as NAME[hi:lo].
+        Falling back to a static table would silently mis-write registers on
+        any DCN generation that moves a field.
+        """
+        cached = getattr(self, '_fmt_layout_cache', None)
+        if cached is not None:
+            return cached
+        layout = {}
+        out = self._umr_background(
+            ["-i", str(self.gpu_instance), "-O", "bits", "-r",
+             f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT0_{self.FMT_REGISTER}"])
+        if out:
+            # umr writes single-bit fields as either NAME[8] or NAME[8:8]
+            # depending on version; accept both rather than silently parsing
+            # a layout that is missing every boolean.
+            for name, hi, lo in re.findall(
+                    r"\.(FMT_[A-Z0-9_]+)\[(\d+)(?::(\d+))?\]", out):
+                hi = int(hi)
+                lo = int(lo) if lo else hi
+                lsb, msb = min(hi, lo), max(hi, lo)
+                layout[name] = (lsb, msb - lsb + 1)
+
+        # Trust the hardware for what it reported, but never let a partial
+        # parse drop a field we know how to write.
+        missing = [f for f in self.FMT_FIELD_BITS_FALLBACK if f not in layout]
+        if missing:
+            for f in missing:
+                layout[f] = self.FMT_FIELD_BITS_FALLBACK[f]
+            self.log_debug("FMT watchdog: umr did not report "
+                           f"{', '.join(sorted(missing))}; using built-in offsets "
+                           "for those")
+        self._fmt_layout_cache = layout
+        return layout
+
+    def _fmt_read_all_raw(self):
+        """Raw value of every FMT_BIT_DEPTH_CONTROL pipe, in a single call."""
+        out = self._umr_background(
+            ["-i", str(self.gpu_instance), "-r",
+             f"{self.asic_name}.{self.block_name}.{self.FMT_REGISTER}"])
+        if not out:
+            return {}
+        found = {}
+        for m in re.finditer(
+                rf"{self.reg_prefix}FMT(\d+)_{self.FMT_REGISTER}\s*=>\s*(0x[0-9a-fA-F]+)", out):
+            found[int(m.group(1))] = int(m.group(2), 0)
+        return found
+
+    def _fmt_desired_fields(self, idx):
+        """bitfield -> integer value that the UI currently asks for.
+
+        Reads Tk variables, so it must run on the main thread.
+        """
+        want = {}
+        for attr, field in self.FMT_WATCH_BOOL_FIELDS:
+            d = getattr(self, attr, None)
+            if isinstance(d, dict) and idx in d:
+                try:
+                    want[field] = 1 if d[idx].get() else 0
+                except tk.TclError:
+                    pass
+        for attr, field, rev_name in self.FMT_WATCH_ENUM_FIELDS:
+            d = getattr(self, attr, None)
+            rev = getattr(self, rev_name, None)
+            if isinstance(d, dict) and idx in d and isinstance(rev, dict):
+                try:
+                    v = rev.get(d[idx].get())
+                except tk.TclError:
+                    continue
+                if v is not None:
+                    want[field] = int(v)
+        return want
+
+    def _fmt_pack(self, raw, wanted, layout):
+        """Fold the desired fields into `raw`, returning (new_raw, changed)."""
+        new = raw
+        changed = []
+        for field, val in wanted.items():
+            if field not in layout:
+                continue
+            lsb, width = layout[field]
+            mask = ((1 << width) - 1) << lsb
+            val_bits = (val << lsb) & mask
+            if (new & mask) != val_bits:
+                new = (new & ~mask) | val_bits
+                changed.append(f"{field}={val}")
+        return new, changed
+
+    def _fmt_remember(self):
+        """Re-baseline after a change this app made, so the next poll does not
+        mistake the user's own write for a driver reset.
+
+        No-op until the watchdog is actually running. Startup restore replays
+        every saved setting through toggle_setting() before the watchdog is
+        scheduled, and there is no baseline to correct yet - the first poll
+        seeds itself from hardware regardless. Without this guard that path
+        also costs one umr round-trip per restored setting.
+        """
+        if getattr(self, '_fmt_watch_thread', None) is None:
+            return
+        snapshot = self._fmt_read_all_raw()
+        if snapshot:
+            self._fmt_last_raw.update(snapshot)
+
+    def _fmt_apply_plans(self, plans):
+        """Worker: one whole-register write per pipe, rather than one per field.
+
+        umr does a read-modify-write for every -wb, so writing ten fields
+        individually is ten sudo round-trips and nine intermediate states
+        visible to the scanout.
+        """
+        for idx, new_raw, changed in plans:
+            path = (f"{self.asic_name}.{self.block_name}"
+                    f".mmFMT{idx}_{self.FMT_REGISTER}")
+            if self._umr_background(["-i", str(self.gpu_instance),
+                                         "-w", path, f"0x{new_raw:x}"]) is None:
+                self.log_debug(f"FMT watchdog: FMT{idx} re-apply failed")
+                continue
+            self.log_debug(f"FMT watchdog: FMT{idx} was reset by the driver, "
+                           f"restored {', '.join(changed)}")
+        self._fmt_remember()
+
+    def _fmt_handle_drift(self, drifted):
+        """Main thread: decide per pipe whether to re-apply or just resync."""
+        try:
+            autoapply = bool(self.fmt_autoapply_var.get())
+        except tk.TclError:
+            autoapply = False
+
+        if not autoapply:
+            for idx in drifted:
+                self.sync_fmt_ui_from_hw(idx)
+            return
+
+        layout = self._fmt_bit_layout()
+        plans = []
+        for idx, raw in drifted.items():
+            new_raw, changed = self._fmt_pack(raw, self._fmt_desired_fields(idx), layout)
+            if changed:
+                plans.append((idx, new_raw, changed))
+            else:
+                self.sync_fmt_ui_from_hw(idx)
+        if plans:
+            threading.Thread(target=self._fmt_apply_plans, args=(plans,),
+                             name="fmt-reapply", daemon=True).start()
+
+    def start_fmt_watchdog(self):
+        """Begin polling on a worker thread. Safe to call more than once."""
+        if getattr(self, '_fmt_watch_thread', None) is not None:
+            return
+        self._fmt_last_raw = {}
+        self._fmt_seeded = set()
+        self._fmt_unauth_logged = False
+        self._fmt_stop = threading.Event()
+        if not hasattr(self, 'fmt_autoapply_var'):
+            self.fmt_autoapply_var = tk.BooleanVar(value=self.auto_reapply_enabled())
+        self._fmt_watch_thread = threading.Thread(
+            target=self._fmt_watch_loop, name="fmt-watchdog", daemon=True)
+        self._fmt_watch_thread.start()
+        self.log_debug(f"FMT watchdog started (every {self.FMT_WATCH_INTERVAL_MS}ms, "
+                       f"backoff to {self.FMT_WATCH_IDLE_MAX_MS}ms when idle)")
+
+    def stop_fmt_watchdog(self, timeout=2.0):
+        """Signal the worker to exit and wait briefly for it."""
+        stop = getattr(self, '_fmt_stop', None)
+        if stop is None:
+            return
+        stop.set()
+        thread = getattr(self, '_fmt_watch_thread', None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self._fmt_watch_thread = None
+
+    def _fmt_watch_loop(self):
+        """Poll loop. Runs off the main thread; touches no Tk state directly."""
+        interval = self.FMT_WATCH_INTERVAL_MS
+        while not self._fmt_stop.wait(interval / 1000.0):
+            try:
+                quiet = self._fmt_watch_once()
+            except Exception as e:                      # never kill the thread
+                self.log_debug(f"FMT watchdog error: {e}")
+                quiet = True
+            # Back off while the register is stable, snap back when it moves.
+            interval = (min(int(interval * 1.5), self.FMT_WATCH_IDLE_MAX_MS)
+                        if quiet else self.FMT_WATCH_INTERVAL_MS)
+
+    def _fmt_watch_once(self):
+        """One poll. Returns True if nothing needed doing (eligible for backoff)."""
+        if os.geteuid() != 0 and not getattr(self, '_helper_authorized', False):
+            if not self._fmt_unauth_logged:
+                self._fmt_unauth_logged = True
+                self.log_debug("FMT watchdog idle: helper not authorised yet")
+            return True
+        self._fmt_unauth_logged = False
+
+        current = self._fmt_read_all_raw()
+        if not current:
+            return True
+
+        drifted = [idx for idx, raw in current.items()
+                   if idx in self._fmt_seeded and raw != self._fmt_last_raw.get(idx)]
+        fresh = [idx for idx in current if idx not in self._fmt_seeded]
+
+        for idx in fresh:
+            # First sighting - adopt hardware as truth so the UI starts out
+            # honest rather than enforcing empty defaults.
+            self._fmt_seeded.add(idx)
+            self._ui_call(self.sync_fmt_ui_from_hw, idx)
+
+        if not drifted:
+            self._fmt_last_raw = current
+            return not fresh
+
+        # The register moved without this app writing it. Reading the Tk
+        # variables and deciding what to write must happen on the main thread;
+        # the register write itself is handed back to this one.
+        self._ui_call(self._fmt_handle_drift, {i: current[i] for i in drifted})
+        self._fmt_last_raw = current
+        return False
+
+    def _ui_call(self, fn, *args):
+        """Marshal a callable onto the Tk main loop, tolerating a dead root."""
+        try:
+            self.root.after(0, lambda: fn(*args))
+        except (tk.TclError, RuntimeError):
+            self._fmt_stop.set()
+
+    def _set_fmt_autoapply(self, on):
+        """Whether the watchdog corrects drift, as opposed to only reporting it."""
+        try:
+            if not hasattr(self, 'fmt_autoapply_var'):
+                self.fmt_autoapply_var = tk.BooleanVar()
+            self.fmt_autoapply_var.set(bool(on))
+        except Exception:
+            pass
 
     def auto_reapply_enabled(self):
         return bool((self.load_settings() or {}).get('auto_reapply', False))
@@ -27357,9 +27641,9 @@ sudo -n umr --version
         new_state = not settings.get('auto_reapply', False)
         settings['auto_reapply'] = new_state
         self.save_settings(settings)
+        self._set_fmt_autoapply(new_state)
         if new_state:
-            # The tick loop is otherwise only started by switching on a Pin.
-            self._start_signal_pin_watchdog()
+            self.start_fmt_watchdog()
             messagebox.showinfo(
                 "Auto-Reapply On ✓",
                 "RedControl will check every connected monitor every 5 seconds "
@@ -27368,49 +27652,12 @@ sudo -n umr --version
                 "Modesets, monitor sleep/wake and some GPU power events all "
                 "undo these silently.")
         else:
-            self.show_status("Auto-Reapply off — settings are no longer restored.", "info")
+            self.show_status(
+                "Auto-Reapply off — the display is still kept in sync with the "
+                "hardware, but changes the driver makes are left alone.", "info")
         self.refresh_menubar()
 
-    def _reapply_tick(self):
-        """Compare hardware against the UI for each connected output."""
-        for idx in sorted(self.connected_output_indices()):
-            try:
-                self._reapply_check_output(idx)
-            except Exception as exc:
-                self.log_debug(f"auto-reapply check FMT{idx} failed: {exc}")
 
-    def _reapply_check_output(self, idx):
-        reg_name = f"{self.reg_prefix}FMT{idx}_FMT_BIT_DEPTH_CONTROL"
-        reg = f"{self.asic_name}.{self.block_name}.{reg_name}"
-        wanted = {}
-        for store, field in self.REAPPLY_FIELDS:
-            d = getattr(self, store, {}) or {}
-            var = d.get(idx)
-            if var is None:
-                continue
-            try:
-                wanted[field] = int(bool(var.get()))
-            except Exception:
-                continue
-        if not wanted:
-            return
-
-        current = self.read_umr_bitfields(reg_name, list(wanted.keys())) or {}
-        if not current:
-            return  # register unreadable right now (e.g. output asleep)
-
-        drifted = [f for f, want in wanted.items()
-                   if current.get(f) is not None and int(current[f]) != want]
-        if not drifted:
-            return
-
-        for field in drifted:
-            self.run_umr_command(["-i", str(self.gpu_instance), "-wb",
-                                  f"{reg}.{field}", str(wanted[field])])
-        connector = (getattr(self, 'monitor_connector_names', {}) or {}).get(idx, f"FMT{idx}")
-        self.log_debug(f"auto-reapply: restored {', '.join(drifted)} on {connector}")
-        self.show_status(
-            f"Restored {len(drifted)} setting(s) on {connector}.", "info")
 
     def _pin_reapply_if_needed(self, idx, w):
         enc = w.get('active_encoder')
