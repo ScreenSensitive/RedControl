@@ -19433,7 +19433,7 @@ class RedControl:
                 "RedControl changes low-level AMD display registers directly (via umr).\n\n"
                 "\u2022 Normally safe, but on rare hardware a bad setting can briefly glitch "
                 "or blank the screen.\n"
-                "\u2022 Risky changes (resolution / refresh) auto-revert after 10 seconds if "
+                f"\u2022 Risky changes (resolution / refresh) auto-revert after {self.REVERT_TIMEOUT_S} seconds if "
                 "the screen goes blank \u2014 just wait it out.\n"
                 "\u2022 Every change is shown as the exact umr command in the Command Log, "
                 "so nothing is hidden.\n\n"
@@ -20445,6 +20445,11 @@ class RedControl:
     # Helper version this build expects. A GUI newer than the installed helper
     # can ask for registers the helper's allowlist does not yet cover, and the
     # writes are refused with nothing obvious to point at -- so say so plainly.
+    # Seconds before an unconfirmed display change reverts itself. The UI text
+    # is derived from this: it was written out by hand in three places and had
+    # already drifted out of step with the code once.
+    REVERT_TIMEOUT_S = 10
+
     HELPER_REQUIRED_VERSION = "1.1"
 
     HELPER_CANDIDATES = ('/usr/libexec/redcontrol-helper',
@@ -25517,7 +25522,7 @@ sudo -n umr --version
             "on X11 — enable it with the amdgpu 'VariableRefresh' Xorg option if supported.",
             read_only=True
         )
-    def show_display_change_confirmation(self, property_name, before_value, after_value, revert_fn, timeout_s=10):
+    def show_display_change_confirmation(self, property_name, before_value, after_value, revert_fn, timeout_s=None):
         """Ask the user to keep a display change; auto-revert on timeout.
 
         Shows a modal 'Keep these settings?' dialog with a countdown. If the
@@ -26406,7 +26411,7 @@ sudo -n umr --version
             "since deep color changes the TMDS clock ratio, which normally requires "
             "link retraining.\n\n"
             "Every force shows a Keep/Revert confirmation; if you don't answer "
-            "within 10 seconds (e.g. the screen went blank), it reverts "
+            f"within {self.REVERT_TIMEOUT_S} seconds (e.g. the screen went blank), it reverts "
             "automatically.\n\n"
             "This is different from Max BPC in Color / Depth: Max BPC is a driver "
             "policy cap that takes effect at the next modeset; this changes what the "
@@ -26440,7 +26445,7 @@ sudo -n umr --version
             encoder_box.bind(_seq, lambda e: "break")
 
         force_note = tk.Label(force_card,
-                              text="Confirm within 15 s or it reverts automatically.\n"
+                              text=f"Confirm within {self.REVERT_TIMEOUT_S} s or it reverts automatically.\n"
                                    "Pin below to survive resolution/refresh changes.",
                               font=('SF Pro Text', 9), fg=fg_muted, bg=bg_card,
                               justify=tk.LEFT)
@@ -26761,7 +26766,7 @@ sudo -n umr --version
             depth_values = list(self.DP_DEPTH_MAP.values())
         else:
             depth_values = list(self.HDMI_DEPTH_MAP.values())
-        w['force_note'].config(text="Confirm within 15 s or it reverts automatically.\n"
+        w['force_note'].config(text=f"Confirm within {self.REVERT_TIMEOUT_S} s or it reverts automatically.\n"
                                     "Reapply after any resolution or refresh change.")
         w['force_box'].configure(values=depth_values, state='readonly')
         if info['depth'] in depth_values:
