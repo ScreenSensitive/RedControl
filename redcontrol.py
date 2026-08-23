@@ -19666,11 +19666,16 @@ class RedControl:
             # Restore exact size + position BEFORE showing (critical on some WMs)
             try:
                 self.root.update_idletasks()
-                if prev_xywh:
+                # Prefer wm_geometry()'s own string. Under a reparenting window
+                # manager winfo_x()/winfo_y() are relative to the WM frame, not
+                # the screen, so replaying them positions the frame at what was
+                # the client offset and the window walks down the screen by the
+                # title-bar height on every theme toggle.
+                if prev_geom:
+                    self.root.geometry(prev_geom)
+                elif prev_xywh:
                     w, h, x, y = prev_xywh
                     self.root.geometry(f"{w}x{h}+{x}+{y}")
-                elif prev_geom:
-                    self.root.geometry(prev_geom)
                 self.root.update_idletasks()
             except Exception:
                 pass
@@ -21222,16 +21227,13 @@ class RedControl:
                     "```\n" + self.build_diagnostics_text() + "\n```\n")
             self.root.clipboard_clear()
             self.root.clipboard_append(body)
-            self.show_status("Diagnostics copied — paste into a new issue at "
-                             "github.com/ScreenSensitive/RedControl/issues",
-                             "info")
+            self.show_status("Diagnostics copied to clipboard.", "info")
 
         btn("Close", win.destroy)
         btn("Copy", copy_report)
         btn("Refresh", refresh)
         tk.Label(row,
-                 text=("Copy, then open an issue at "
-                       "github.com/ScreenSensitive/RedControl/issues and paste."),
+                 text="Copy includes the full report.",
                  bg=self.bg,
                  fg=self.theme.get('fg_muted', self.fg),
                  font=('SF Pro Text', 9)).pack(side='left')
