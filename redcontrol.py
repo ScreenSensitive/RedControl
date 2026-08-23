@@ -19098,6 +19098,80 @@ class ToolTip:
                     pass
                 tt.after_id = None
 
+# ---------------------------------------------------------------------------
+# EDID parsing, read-only.
+#
+# Ported from the signal-pixel-encoding branch with the mutation half
+# (set_ycbcr/refresh_checksums/bytes) deliberately left behind: writing a
+# modified EDID means a privileged write to debugfs, which this build routes
+# through redcontrol-helper and the helper has no write verb. Reporting what
+# the driver chose needs only the parser.
+# ---------------------------------------------------------------------------
+class EdidBlob:
+    """Minimal EDID reader/patcher for forcing the wire pixel encoding.
+
+amdgpu has no DRM property for pixel encoding on this kernel: it picks
+YCbCr 4:4:4 whenever the sink's EDID advertises support for it, and RGB
+otherwise (fill_stream_properties_from_drm_display_mode). Clearing the
+advertisement is therefore the only way to force RGB from userspace.
+
+The kernel derives connector->display_info.color_formats from two
+independent places in drm_edid.c, and a patch that misses either one
+silently does nothing:
+
+  1. drm_add_display_info()  - base block byte 24 bits 3/4, but ONLY when
+     edid->revision >= 4.
+  2. drm_parse_cea_ext()     - byte 3 bits 5/4 of EACH CEA-861 extension
+     block, of which there may be more than one."""
+
+    def __init__(self, data):
+        if not data or len(data) < self.BLOCK or len(data) % self.BLOCK:
+            raise ValueError(f"not a whole number of EDID blocks: {len(data) if data else 0}")
+        if bytes(data[:8]) != self.MAGIC:
+            raise ValueError("missing EDID header magic")
+        self.d = bytearray(data)
+
+    def nblocks(self):
+        return len(self.d) // self.BLOCK
+
+    def revision(self):
+        return self.d[19]
+
+    def cea_blocks(self):
+        return [i for i in range(1, self.nblocks) if self.d[i * self.BLOCK] == self.EXT_CEA]
+
+    def base_bits_honoured(self):
+        """Base-block colour bits only count for EDID 1.4 and later."""
+        return self.revision >= 4
+
+    def advertises_ycbcr(self):
+        """Mirror the kernel's color_formats derivation. -> (y444, y422)"""
+        y444 = y422 = False
+        if self.base_bits_honoured():
+            y444 |= bool(self.d[24] & self.FEAT_YCRCB444)
+            y422 |= bool(self.d[24] & self.FEAT_YCRCB422)
+        for i in self.cea_blocks():
+            b3 = self.d[i * self.BLOCK + 3]
+            y444 |= bool(b3 & self.CEA_YCRCB444)
+            y422 |= bool(b3 & self.CEA_YCRCB422)
+        return y444, y422
+
+    def predicted_encoding(self, is_hdmi):
+        """What amdgpu will select for this EDID.
+
+        The YCbCr branches are gated on SIGNAL_TYPE_HDMI_TYPE_A, so a
+        DisplayPort link is always RGB no matter what the EDID claims.
+        """
+        if not is_hdmi:
+            return "RGB 4:4:4"
+        y444, y422 = self.advertises_ycbcr()
+        if y444:
+            return "YCbCr 4:4:4"
+        if y422:
+            return "YCbCr 4:2:2"
+        return "RGB 4:4:4"
+
+
 class ToggleSwitch(tk.Canvas):
     """iOS-style toggle switch"""
     def __init__(self, parent, variable, command=None, **kwargs):
@@ -26180,6 +26254,103 @@ sudo -n umr --version
                     pass
         return fields
 
+    def connector_card_index(self, connector_name):
+        """DRM card index backing a connector, for its debugfs path."""
+        for p in glob.glob(f"/sys/class/drm/card*-{connector_name}"):
+            m = re.search(r"/card(\d+)-", p)
+            if m:
+                return int(m.group(1))
+        return None
+
+    def read_connector_edid(self, connector_name):
+        """Current EDID straight from sysfs.
+
+        Read from /sys/class/drm rather than xrandr: under Wayland the
+        XWayland output exposes no EDID property at all, so the xrandr path
+        used elsewhere in this app returns nothing there.
+
+        Note this returns the OVERRIDE when one is active, not the real
+        EDID - use connector_stock_edid() for that.
+        """
+        try:
+            data = Path(f"/sys/class/drm/card{self.connector_card_index(connector_name)}"
+                        f"-{connector_name}/edid").read_bytes()
+        except (OSError, TypeError):
+            return None
+        return data or None
+
+    def predicted_encoding_for(self, connector_name):
+        """What amdgpu will have chosen, derived from the EDID it read.
+
+        Not a measurement. DCN 3.x offers no register carrying the RGB vs
+        YCbCr distinction, so this reproduces the driver's own selection
+        rule against the EDID currently on the connector.
+        """
+        live = self.read_connector_edid(connector_name)
+        if not live:
+            return None
+        try:
+            return EdidBlob(live).predicted_encoding(True)
+        except ValueError:
+            return None
+
+    def sync_encoding_ui(self, idx, connector_name):
+        """Point the dropdown at whatever is actually loaded on the connector.
+
+        This control is stateless across restarts by design - the override
+        lives in debugfs, not in this app - so the widget has to be
+        initialised from hardware. Otherwise it claims Auto while an
+        override is live, which is worse than showing nothing: it invites
+        you to "set" the state it is already in, which the no-op check then
+        silently ignores.
+        """
+        w = self.dp_widgets.get(idx)
+        if not w or 'encoding_var' not in w:
+            return
+        live = self.read_connector_edid(connector_name)
+        stock = self.connector_stock_edid(connector_name)
+        if not live or not stock:
+            return
+        try:
+            forced = EdidBlob(stock)
+            forced.set_ycbcr(allow444=False, allow422=False)
+        except ValueError:
+            return
+        label = self.ENC_RGB if bytes(live) == forced.bytes() else self.ENC_AUTO
+        # Assigning to the StringVar does not emit <<ComboboxSelected>>, so
+        # this cannot re-trigger an apply.
+        if w['encoding_var'].get() != label:
+            w['encoding_var'].set(label)
+
+    def register_combobox(self, box):
+        """Track a combobox so its popdown can be force-closed on deactivate."""
+        if not hasattr(self, '_comboboxes'):
+            self._comboboxes = []
+            self.root.bind('<FocusOut>', self._unpost_comboboxes, add='+')
+            self.root.bind('<Unmap>', self._unpost_comboboxes, add='+')
+        self._comboboxes.append(box)
+        return box
+
+    def _unpost_comboboxes(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        # A FocusOut also fires when the popdown itself takes focus, so
+        # re-check on a later cycle rather than closing what the user just
+        # opened.
+        self.root.after(120, self._unpost_if_inactive)
+
+    def _unpost_if_inactive(self):
+        try:
+            if self.root.focus_displayof() is not None:
+                return          # focus is still inside this application
+        except (tk.TclError, KeyError):
+            return              # unknown window (the popdown) - leave it alone
+        for box in getattr(self, '_comboboxes', ()):
+            try:
+                box.tk.call('ttk::combobox::Unpost', box)
+            except tk.TclError:
+                pass
+
     def detect_signal_encoders(self):
         """Probe DIG encoders via UMR and classify each active one as DP or HDMI.
 
@@ -26621,7 +26792,17 @@ sudo -n umr --version
         else:
             link_type = "HDMI / TMDS"
         w['mode_label'].config(text=f"Link Type:  {link_type}{suffix}")
-        w['encoding_label'].config(text=f"Pixel Encoding:  {info['encoding']}")
+        # DP carries the encoding in DP_PIXEL_ENCODING and is measured. DCN 3.x
+        # exposes no equivalent register on the HDMI/TMDS path, so reporting the
+        # DP mapping there claimed RGB for every HDMI output regardless of what
+        # the driver actually chose. Fall back to reproducing the driver's own
+        # selection rule against the connector's EDID, and label it as derived.
+        encoding_text = info['encoding']
+        if info['mode'] != 'DP' and enc_connector:
+            predicted = self.predicted_encoding_for(enc_connector)
+            if predicted:
+                encoding_text = f"{predicted} (derived from EDID)"
+        w['encoding_label'].config(text=f"Pixel Encoding:  {encoding_text}")
         w['depth_label'].config(text=f"Depth on Link:  {info['depth']}")
         w['current_depth'] = info['depth']
 
