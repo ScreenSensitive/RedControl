@@ -27897,71 +27897,8 @@ sudo -n umr --version
             interval = (min(int(interval * 1.5), self.FMT_WATCH_IDLE_MAX_MS)
                         if quiet else self.FMT_WATCH_INTERVAL_MS)
 
-    # A monitor that goes to sleep can deassert HPD -- common on DisplayPort --
-    # so the connector reads "disconnected" exactly as if it were unplugged.
-    # Requiring the new state to hold for several ticks keeps a sleep, a mode
-    # change or a wake from tearing the UI down and rebuilding it.
-    CONNECTOR_STABLE_TICKS = 3
-
-    def _connector_snapshot(self):
-        """{connector: status} from sysfs. No privileges, no umr, no cost."""
-        snap = {}
-        for path in glob.glob('/sys/class/drm/card*-*/status'):
-            try:
-                with open(path) as fh:
-                    snap[path.split('/')[-2]] = fh.read().strip()
-            except OSError:
-                continue
-        return snap
-
-    def _check_connector_changes(self):
-        """Notice displays appearing or disappearing, without trusting a blip."""
-        snap = self._connector_snapshot()
-        if not snap:
-            return
-        known = getattr(self, '_conn_known', None)
-        if known is None:
-            self._conn_known = snap
-            return
-        if snap == known:
-            self._conn_pending, self._conn_stable = None, 0
-            return
-
-        if snap == getattr(self, '_conn_pending', None):
-            self._conn_stable = getattr(self, '_conn_stable', 0) + 1
-        else:
-            self._conn_pending, self._conn_stable = snap, 1
-
-        if self._conn_stable < self.CONNECTOR_STABLE_TICKS:
-            return
-
-        added = [c for c, s in snap.items()
-                 if s == 'connected' and known.get(c) != 'connected']
-        removed = [c for c, s in known.items()
-                   if s == 'connected' and snap.get(c) != 'connected']
-        self._conn_known = snap
-        self._conn_pending, self._conn_stable = None, 0
-        self._ui_call(self._on_connectors_changed, added, removed)
-
-    def _on_connectors_changed(self, added, removed):
-        # Never rebuild the UI out from under something in progress.
-        if getattr(self, '_crc_test_active', False):
-            return
-        what = ", ".join(added + removed) or "display layout"
-        self.show_status(f"{what} changed — rescanning.", "info")
-        try:
-            self.scan_monitors()
-        except Exception as exc:
-            self.log_debug(f"hotplug rescan failed: {exc}")
-
     def _fmt_watch_once(self):
         """One poll. Returns True if nothing needed doing (eligible for backoff)."""
-        # Cheap and unprivileged, so it runs every tick regardless of whether
-        # the register poll below is allowed to.
-        try:
-            self._check_connector_changes()
-        except Exception as exc:
-            self.log_debug(f"connector poll failed: {exc}")
         if os.geteuid() != 0 and not getattr(self, '_helper_authorized', False):
             if not self._fmt_unauth_logged:
                 self._fmt_unauth_logged = True
