@@ -30,12 +30,14 @@ git clone <this-repo-url> RedControl && cd RedControl
 
 - 🎛️ **Dithering Control** — enable/disable spatial and temporal dithering, RGB noise, highpass/frame random, with per-depth and per-mode settings on every output (HDMI, DisplayPort, eDP, DVI)
 - ✂️ **Color Truncation** — force a static signal by truncating/rounding to 6/8/10/12 bpc instead of dithering
-- ⇄ **Signal panel** — live view of the DIG encoder driving each output: link type (DisplayPort, HDMI, or HDMI-over-DP++), pixel encoding (RGB/YCbCr) and the color depth actually on the wire. Force `DP_COMPONENT_DEPTH` (DP, 6–16 bpc) or `HDMI_DEEP_COLOR_DEPTH` (HDMI, 8–16 bpc) instantly — no modeset required; HDMI changes auto-revert in 15 s unless confirmed
+- ⇄ **Signal panel** — live view of the DIG encoder driving each output: link type (DisplayPort, HDMI, or HDMI-over-DP++), pixel encoding (RGB/YCbCr) and the color depth actually on the wire. Force `DP_COMPONENT_DEPTH` (DP, 6–16 bpc) or `HDMI_DEEP_COLOR_DEPTH` (HDMI, 8–16 bpc) instantly — no modeset required; HDMI changes auto-revert in 10 s unless confirmed
 - 🎨 **Color / Depth** — max bpc, colorspace (BT.709/opRGB/BT.2020), RGB range (full/limited) per connector
 - 🖥️ **Multi-Monitor** — CRTC-based pipe mapping; each display configured independently
 - 🎮 **Multi-GPU** — automatic detection and switching between AMD GPUs
-- 🔄 **Settings Persistence** — per-monitor auto-save/restore
-- ⏱️ **Safe Mode Changes** — resolution/refresh changes ask for confirmation and auto-revert after 15 s if the screen goes blank
+- 🔄 **Settings Persistence** — per-monitor auto-save/restore, optionally reapplied at startup
+- 🛡️ **Auto-Reapply** — a background watchdog notices when the driver resets your dithering (modeset, DPMS, resume) and restores it; with it off, the UI is still kept in sync with the hardware
+- 🩺 **Diagnostics** — shows which pipe each monitor uses, every pipe's state, and the detected register naming; copyable for bug reports
+- ⏱️ **Safe Mode Changes** — resolution/refresh changes ask for confirmation and auto-revert after 10 s if the screen goes blank
 - 💾 **VRAM Vendor Detection** — Samsung / Hynix / Micron shown next to the GPU name
 - 🚀 **System Tray** — minimize to tray with quick actions
 - 📋 **Command Log** — every register write is logged as the exact `umr` command, so you can reproduce or script anything the GUI does
@@ -139,7 +141,7 @@ python3 redcontrol.py --tray     # start in system tray
 python3 redcontrol.py --debug    # verbose console output
 ```
 
-Run as a normal user — UMR calls go through `sudo`, and the app can set up passwordless access for the exact commands it needs (menu: Auto-Start → Passwordless Access).
+Run as a normal user. Register access goes through the privileged helper, and polkit asks you to authenticate once per login session — see [How RedControl gets permission](#how-redcontrol-gets-permission).
 
 ### Signal panel
 
