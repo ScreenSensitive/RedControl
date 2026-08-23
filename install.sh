@@ -213,7 +213,7 @@ Path=$HERE
 $ICON_LINE
 Terminal=false
 StartupNotify=false
-Categories=Settings;HardwareSettings;
+Categories=System;Settings;Utility;
 Keywords=display;dither;dithering;flicker;amd;gpu;depth;bpc;displayport;hdmi;
 EOF
 chmod +x "$APPS/redcontrol.desktop" 2>/dev/null
