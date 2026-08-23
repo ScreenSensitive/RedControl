@@ -21532,6 +21532,8 @@ class RedControl:
         if match:
             index = int(match.group(1), 0)
             console_print(f"DEBUG: Switching to GPU index {index}")
+            self.invalidate_helper_cache()
+            self.invalidate_scan_cache()
             self.select_gpu(index)
 
             # Clear old GPU state
@@ -24478,6 +24480,11 @@ sudo -n umr --version
     def scan_monitors(self):
         """Scan outputs with proper CRTC→FMT mapping"""
         console_print(f"DEBUG: scan_monitors() called, gpu_instance={self.gpu_instance}")
+
+        # A rescan exists to notice hardware changes, so it must not be served
+        # from the caches that make ordinary startup fast.
+        self.invalidate_helper_cache()
+        self.invalidate_scan_cache()
 
         # Probe whether debugfs colorspace files are reachable at all.
         console_print("\n=== debugfs colorspace probe ===")
