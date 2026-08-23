@@ -21341,12 +21341,38 @@ class RedControl:
                  fg=self.theme.get('fg_muted', self.fg),
                  font=('SF Pro Text', 9)).pack(side='left')
 
+    # Privileged reads are expensive -- each is a pkexec plus a umr process,
+    # 100-300ms. A scan resolves several connectors in a row and would
+    # otherwise re-read the same registers for each one, so results are held
+    # briefly. Short enough that nothing stale is ever acted on.
+    SCAN_CACHE_S = 2.0
+
+    def _scan_cached(self, key, produce):
+        cache = getattr(self, '_scan_cache', None)
+        if cache is None:
+            cache = self._scan_cache = {}
+        hit = cache.get(key)
+        now = time.time()
+        if hit and now - hit[0] < self.SCAN_CACHE_S:
+            return hit[1]
+        value = produce()
+        cache[key] = (now, value)
+        return value
+
+    def invalidate_scan_cache(self):
+        self._scan_cache = {}
+
     def read_all_fmt_pipes(self):
         """{pipe index: raw register value} for every FMT block on this GPU.
 
         Querying FMT_BIT_DEPTH_CONTROL without a pipe number makes umr return
         the whole set in one call.
         """
+        return self._scan_cached(
+            ('fmt_pipes', self.gpu_instance, self.asic_name, self.block_name),
+            self._read_all_fmt_pipes_uncached)
+
+    def _read_all_fmt_pipes_uncached(self):
         path = f"{self.asic_name}.{self.block_name}.FMT_BIT_DEPTH_CONTROL"
         out = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path]) or ""
         pipes = {}
@@ -24149,17 +24175,14 @@ sudo -n umr --version
                 self.detect_reg_prefix()
                 gpu_info['reg_prefix'] = self.reg_prefix
 
-                # Check if this GPU has any active outputs
-                has_monitors = False
+                # Check if this GPU has any active outputs. Querying the
+                # register without a pipe number returns every FMT block in one
+                # call; probing FMT0..4 individually cost five privileged round
+                # trips per GPU, each one a pkexec plus a umr process.
                 connectors = self.get_drm_connectors()
-                for i in range(5):
-                    path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{i}_FMT_BIT_DEPTH_CONTROL"
-                    output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
-                    if output:
-                        match = re.search(r"=> (0x[0-9a-fA-F]+)", output)
-                        if match and match.group(1) != FMT_INACTIVE_VALUE:
-                            has_monitors = True
-                            break
+                pipes = self.read_all_fmt_pipes()
+                inactive = int(FMT_INACTIVE_VALUE, 16)
+                has_monitors = any(v != inactive for v in pipes.values())
 
                 if has_monitors:
                     gpu_with_monitors = idx
@@ -24500,13 +24523,10 @@ sudo -n umr --version
         else:
             console_print("DEBUG: No CRTC info available, using assumption-based mapping (FMT index = connector order)")
             # Fall back to old method: assume FMT index matches connector order
+            all_pipes = self.read_all_fmt_pipes()   # one call, every pipe
             for i in range(len(connected_list)):
-                path = f"{self.asic_name}.{self.block_name}.{self.reg_prefix}FMT{i}_FMT_BIT_DEPTH_CONTROL"
-                output = self.run_umr_command(["-i", str(self.gpu_instance), "-r", path])
-                if output:
-                    match = re.search(r"=> (0x[0-9a-fA-F]+)", output)
-                    if match:
-                        register_value = match.group(1)
+                if i in all_pipes:
+                        register_value = f"0x{all_pipes[i]:08x}"
                         console_print(f"DEBUG: FMT{i} register value: {register_value}")
 
                         if register_value != FMT_INACTIVE_VALUE:
@@ -26382,7 +26402,13 @@ sudo -n umr --version
             except tk.TclError:
                 pass
 
-    def detect_signal_encoders(self):
+    def detect_signal_encoders(self, *args, **kwargs):
+        if args or kwargs:
+            return self._detect_signal_encoders(*args, **kwargs)
+        return self._scan_cached(('encoders', self.gpu_instance),
+                                 self._detect_signal_encoders)
+
+    def _detect_signal_encoders(self):
         """Probe DIG encoders via UMR and classify each active one as DP or HDMI.
 
         A DIG frontend is considered active when its symbol clock is running
