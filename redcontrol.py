@@ -24614,6 +24614,17 @@ sudo -n umr --version
         except Exception:
             pass
 
+        # Read the hardware once more now that the tabs exist. Each tab loads
+        # saved settings at +100ms and corrects them from hardware at +150ms,
+        # but that correction gives up silently if the read fails -- which it
+        # does while polkit is still asking for authentication. The controls
+        # would then keep whatever was in the settings file and never re-read,
+        # showing a state the GPU does not have.
+        try:
+            self.root.after(900, self.resync_all_tabs_from_hw)
+        except Exception:
+            pass
+
         if len(self.active_outputs) == 0:
             console_print("DEBUG: No monitors - showing message")
             # Set the message text
