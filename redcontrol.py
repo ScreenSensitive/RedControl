@@ -20757,12 +20757,32 @@ class RedControl:
 
     @staticmethod
     def admin_group():
-        """Group polkit treats as administrators on this distro."""
-        import grp
+        """Group polkit treats as administrators, that this user is actually in.
+
+        Arch and Fedora use wheel, Debian and Ubuntu use sudo, and a machine can
+        have both -- Debian ships an empty wheel group. Picking by name alone
+        would write a rule for a group the user does not belong to, which fails
+        silently: no error, just a prompt that never goes away.
+        """
+        import grp, os, pwd
+        try:
+            user = pwd.getpwuid(os.getuid()).pw_name
+            gids = set(os.getgroups())
+        except Exception:
+            user, gids = None, set()
         for name in ('wheel', 'sudo', 'admin'):
             try:
-                if grp.getgrnam(name).gr_mem or name == 'wheel':
-                    return name
+                g = grp.getgrnam(name)
+            except KeyError:
+                continue
+            if (user and user in g.gr_mem) or g.gr_gid in gids:
+                return name
+        # Nothing matched: fall back to whichever admin group exists, so the
+        # rule at least names something real.
+        for name in ('wheel', 'sudo', 'admin'):
+            try:
+                grp.getgrnam(name)
+                return name
             except KeyError:
                 continue
         return 'wheel'
