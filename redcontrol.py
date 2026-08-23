@@ -27927,18 +27927,22 @@ sudo -n umr --version
             self._conn_pending, self._conn_stable = None, 0
             return
 
+        added = [c for c, s in snap.items()
+                 if s == 'connected' and known.get(c) != 'connected']
+        removed = [c for c, s in known.items()
+                   if s == 'connected' and snap.get(c) != 'connected']
+
         if snap == getattr(self, '_conn_pending', None):
             self._conn_stable = getattr(self, '_conn_stable', 0) + 1
         else:
             self._conn_pending, self._conn_stable = snap, 1
 
-        if self._conn_stable < self.CONNECTOR_STABLE_TICKS:
+        # A display appearing is unambiguous -- a sleeping monitor never adds a
+        # connector -- so act at once. A disappearance might just be DPMS
+        # deasserting HPD, so that still has to hold.
+        needed = 1 if added else self.CONNECTOR_STABLE_TICKS
+        if self._conn_stable < needed:
             return
-
-        added = [c for c, s in snap.items()
-                 if s == 'connected' and known.get(c) != 'connected']
-        removed = [c for c, s in known.items()
-                   if s == 'connected' and snap.get(c) != 'connected']
         self._conn_known = snap
         self._conn_pending, self._conn_stable = None, 0
         self._ui_call(self._on_connectors_changed, added, removed)
@@ -27947,8 +27951,25 @@ sudo -n umr --version
         # Never rebuild the UI out from under something in progress.
         if getattr(self, '_crc_test_active', False):
             return
+
+        # The sidebar tiles cost nothing to redraw, so reflect the change
+        # immediately rather than after the full detection pass.
         what = ", ".join(added + removed) or "display layout"
-        self.show_status(f"{what} changed — rescanning.", "info")
+        try:
+            self.refresh_monitor_tiles()
+        except Exception:
+            pass
+        self.show_status(f"{what} changed — updating.", "info")
+
+        # Only a display appearing or vanishing needs the tabs rebuilt; that is
+        # the slow part, so it runs after the UI has already acknowledged the
+        # change rather than blocking it.
+        try:
+            self.root.after(50, self._hotplug_rescan)
+        except Exception:
+            pass
+
+    def _hotplug_rescan(self):
         try:
             self.scan_monitors()
         except Exception as exc:
